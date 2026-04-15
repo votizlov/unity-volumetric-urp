@@ -1,0 +1,95 @@
+#pragma kernel CSMain
+#pragma target 4.5
+#pragma multi_compile _ _MAIN_LIGHT_SHADOWS
+#pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
+#pragma multi_compile _ _ADDITIONAL_LIGHT_SHADOWS
+#pragma multi_compile _ _SHADOWS_SOFT
+#pragma multi_compile _ _VL_ADDITIONAL_LIGHTS
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+#include "Assets/Packages/VolumetricLighting/Resources/VolumetricLighting/VolumetricLightingCommon.hlsl"
+
+struct VolumetricLightingAdditionalLight
+{
+    float4 position;
+    float4 color;
+    float4 attenuation;
+    float4 spotDirection;
+    float4 extraData;
+};
+
+TEXTURE2D_X(_CameraDepthTexture);
+RW_TEXTURE3D(float4, _VolumetricLightingFroxelTexture);
+StructuredBuffer<VolumetricLightingAdditionalLight> _VolumetricLightingAdditionalLights;
+
+float4 _VolumetricLightingGridParams;
+float4 _VolumetricLightingScreenSize;
+float4 _VolumetricLightingVolumeParams;
+float4x4 _VolumetricLightingInverseProjectionMatrix;
+float4x4 _VolumetricLightingCameraToWorldMatrix;
+float4 _VolumetricLightingMainLightDirection;
+float4 _VolumetricLightingMainLightColor;
+int _VolumetricLightingAdditionalLightCount;
+
+[numthreads(4, 4, 4)]
+void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    int3 grid = int3(_VolumetricLightingGridParams.xyz);
+    if (any(dispatchThreadID >= grid))
+        return;
+
+    float nearDepth = _VolumetricLightingVolumeParams.x;
+    float maxDistance = _VolumetricLightingVolumeParams.y;
+
+    float2 uv = (float2(dispatchThreadID.xy) + 0.5) / max(_VolumetricLightingGridParams.xy, 1.0);
+    uv.y = 1.0 - uv.y;
+    float linearDepth = VolumetricLighting_SliceIndexToLinearDepth(dispatchThreadID.z, _VolumetricLightingGridParams.z, nearDepth, maxDistance);
+    int2 pixelCoord = min(int2(uv * _VolumetricLightingScreenSize.xy), int2(_VolumetricLightingScreenSize.xy) - 1);
+
+    float rawDepth = LOAD_TEXTURE2D_X(_CameraDepthTexture, pixelCoord).x;
+    float sceneDepth = LinearEyeDepth(rawDepth, _ZBufferParams);
+    if (!isfinite(sceneDepth) || sceneDepth <= 0.0)
+        sceneDepth = maxDistance;
+    sceneDepth = min(sceneDepth, maxDistance);
+
+    float3 viewRay = VolumetricLighting_GetViewRay(uv, _VolumetricLightingInverseProjectionMatrix);
+    float3 viewPosition = viewRay * linearDepth;
+    float3 worldPosition = mul(_VolumetricLightingCameraToWorldMatrix, float4(viewPosition, 1.0)).xyz;
+
+    float visibility = linearDepth <= (sceneDepth + 0.5) ? 1.0 : 0.0;
+    float shadowAttenuation = 1.0;
+    half3 lighting = half3(0.0, 0.0, 0.0);
+
+#if defined(_MAIN_LIGHT_SHADOWS) || defined(_MAIN_LIGHT_SHADOWS_CASCADE)
+    float4 shadowCoord = TransformWorldToShadowCoord(worldPosition);
+    shadowAttenuation = MainLightRealtimeShadow(shadowCoord);
+#endif
+
+    lighting += _VolumetricLightingMainLightColor.rgb * shadowAttenuation;
+
+#if defined(_VL_ADDITIONAL_LIGHTS)
+    [loop]
+    for (int lightIndex = 0; lightIndex < _VolumetricLightingAdditionalLightCount; ++lightIndex)
+    {
+        VolumetricLightingAdditionalLight lightData = _VolumetricLightingAdditionalLights[lightIndex];
+        float3 lightVector = lightData.position.xyz - worldPosition;
+        float distanceSqr = max(dot(lightVector, lightVector), HALF_MIN);
+        half3 lightDirection = half3(lightVector * rsqrt(distanceSqr));
+        float attenuation = DistanceAttenuation(distanceSqr, lightData.attenuation.xy);
+
+        if (lightData.extraData.y > 0.5)
+            attenuation *= AngleAttenuation(lightData.spotDirection.xyz, lightDirection, lightData.attenuation.zw);
+
+        #if defined(_ADDITIONAL_LIGHT_SHADOWS)
+        half additionalShadow = AdditionalLightRealtimeShadow((int)lightData.extraData.x, worldPosition, lightDirection);
+        #else
+        half additionalShadow = half(1.0);
+        #endif
+
+        lighting += lightData.color.rgb * (attenuation * additionalShadow);
+    }
+#endif
+
+    _VolumetricLightingFroxelTexture[dispatchThreadID] = float4(lighting * visibility, visibility);
+}
