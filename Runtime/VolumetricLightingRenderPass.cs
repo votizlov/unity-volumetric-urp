@@ -92,8 +92,12 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         bool hasMainDirectionalLight = lightData.mainLightIndex >= 0
             && lightData.mainLightIndex < lightData.visibleLights.Length
             && lightData.visibleLights[lightData.mainLightIndex].light != null
-            && lightData.visibleLights[lightData.mainLightIndex].lightType == LightType.Directional;
-        if (!hasMainDirectionalLight && !settings.enableAdditionalLights)
+            && lightData.visibleLights[lightData.mainLightIndex].lightType == LightType.Directional
+            && ShouldProcessLight(lightData.visibleLights[lightData.mainLightIndex].light);
+
+        bool enableDirectLighting = settings.enableDirectLighting && hasMainDirectionalLight;
+        bool requestAdditionalLights = settings.enableAdditionalLights;
+        if (!enableDirectLighting && !requestAdditionalLights)
             return;
 
         int gridX = Mathf.Max(1, settings.gridX);
@@ -140,16 +144,19 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         Color lightColor = hasMainDirectionalLight
             ? lightData.visibleLights[lightData.mainLightIndex].finalColor
             : Color.black;
+        int additionalLightCount = requestAdditionalLights
+            ? UpdateAdditionalLightsBuffer(lightData)
+            : 0;
+        bool enableAdditionalLights = requestAdditionalLights && additionalLightCount > 0;
+
+        if (!enableDirectLighting && !enableAdditionalLights)
+            return;
 
         using (IComputeRenderGraphBuilder builder = renderGraph.AddComputePass<ComputePassData>(
                    "Volumetric Lighting Froxel Update",
                    out ComputePassData passData,
                    profilingSampler))
         {
-            int additionalLightCount = settings.enableAdditionalLights
-                ? UpdateAdditionalLightsBuffer(lightData)
-                : 0;
-
             passData.computeShader = froxelUpdateShader;
             passData.computeKernelIndex = computeKernelIndex;
             passData.cameraDepthTexture = resourceData.cameraDepthTexture;
@@ -172,7 +179,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             passData.dispatchGroupsX = Mathf.CeilToInt(gridX / (float)threadGroupSizeX);
             passData.dispatchGroupsY = Mathf.CeilToInt(gridY / (float)threadGroupSizeY);
             passData.dispatchGroupsZ = Mathf.CeilToInt(gridZ / (float)threadGroupSizeZ);
-            passData.enableAdditionalLights = settings.enableAdditionalLights;
+            passData.enableDirectLighting = enableDirectLighting;
+            passData.enableAdditionalLights = enableAdditionalLights;
 
             builder.UseTexture(passData.cameraDepthTexture, AccessFlags.Read);
             builder.UseTexture(passData.froxelTexture, AccessFlags.Write);
@@ -280,6 +288,12 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         if (data.dispatchGroupsX <= 0 || data.dispatchGroupsY <= 0 || data.dispatchGroupsZ <= 0)
             return;
 
+        LocalKeyword directLightingKeyword = new(data.computeShader, VolumetricLightingShaderIDs.DirectLightingKeyword);
+        if (data.enableDirectLighting)
+            context.cmd.EnableKeyword(data.computeShader, directLightingKeyword);
+        else
+            context.cmd.DisableKeyword(data.computeShader, directLightingKeyword);
+
         LocalKeyword additionalLightsKeyword = new(data.computeShader, VolumetricLightingShaderIDs.AdditionalLightsKeyword);
         if (data.enableAdditionalLights)
             context.cmd.EnableKeyword(data.computeShader, additionalLightsKeyword);
@@ -361,6 +375,9 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             if (light == null)
                 continue;
 
+            if (!ShouldProcessLight(light))
+                continue;
+
             if (visibleLight.lightType != LightType.Point && visibleLight.lightType != LightType.Spot)
                 continue;
 
@@ -389,6 +406,13 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
         int newSize = Mathf.NextPowerOfTwo(Mathf.Max(1, count));
         additionalLightsCpuData = new AdditionalLightGpuData[newSize];
+    }
+
+    static bool ShouldProcessLight(Light light)
+    {
+        return light != null
+            && light.TryGetComponent(out VolumetricLight volumetricLight)
+            && volumetricLight.ShouldProcess;
     }
 
     static AdditionalLightGpuData CreateAdditionalLightGpuData(in VisibleLight visibleLight, Light light, int shadowLightIndex)
@@ -487,6 +511,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal int dispatchGroupsY;
         internal int dispatchGroupsZ;
         internal int additionalLightCount;
+        internal bool enableDirectLighting;
         internal bool enableAdditionalLights;
         internal float nearDepth;
         internal float maxDistance;

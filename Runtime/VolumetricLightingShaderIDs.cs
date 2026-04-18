@@ -2,6 +2,7 @@ using UnityEngine;
 
 static class VolumetricLightingShaderIDs
 {
+    internal const string DirectLightingKeyword = "_VL_DIRECT_LIGHTING";
     internal const string AdditionalLightsKeyword = "_VL_ADDITIONAL_LIGHTS";
 
     internal static readonly int CameraDepthTexture = Shader.PropertyToID("_CameraDepthTexture");

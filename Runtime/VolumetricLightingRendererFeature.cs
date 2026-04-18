@@ -26,6 +26,7 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         [Min(1)] public int stepCount = 48;
         [Range(0f, 1f)] public float jitterStrength = 0.25f;
         [Min(0f)] public float compositeDepthBias = 0.01f;
+        public bool enableDirectLighting = true;
         public bool enableAdditionalLights = false;
         public bool enableKawaseBlur = false;
         [Min(0f)] public float kawaseIteration = 1f;

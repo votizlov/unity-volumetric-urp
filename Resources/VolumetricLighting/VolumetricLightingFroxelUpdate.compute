@@ -4,6 +4,7 @@
 #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
 #pragma multi_compile _ _ADDITIONAL_LIGHT_SHADOWS
 #pragma multi_compile _ _SHADOWS_SOFT
+#pragma multi_compile _ _VL_DIRECT_LIGHTING
 #pragma multi_compile _ _VL_ADDITIONAL_LIGHTS
 
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
@@ -58,8 +59,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 worldPosition = mul(_VolumetricLightingCameraToWorldMatrix, float4(viewPosition, 1.0)).xyz;
 
     float visibility = linearDepth <= (sceneDepth + 0.5) ? 1.0 : 0.0;
-    float shadowAttenuation = 1.0;
     half3 lighting = half3(0.0, 0.0, 0.0);
+
+#if defined(_VL_DIRECT_LIGHTING)
+    float shadowAttenuation = 1.0;
 
 #if defined(_MAIN_LIGHT_SHADOWS) || defined(_MAIN_LIGHT_SHADOWS_CASCADE)
     float4 shadowCoord = TransformWorldToShadowCoord(worldPosition);
@@ -67,6 +70,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 #endif
 
     lighting += _VolumetricLightingMainLightColor.rgb * shadowAttenuation;
+#endif
 
 #if defined(_VL_ADDITIONAL_LIGHTS)
     [loop]
