@@ -6,6 +6,7 @@ static class VolumetricLightingShaderIDs
     internal const string AdditionalLightsKeyword = "_VL_ADDITIONAL_LIGHTS";
 
     internal static readonly int CameraDepthTexture = Shader.PropertyToID("_CameraDepthTexture");
+    internal static readonly int KawaseDepthTexture = Shader.PropertyToID("_VolumetricLightingKawaseDepthTexture");
     internal static readonly int FroxelTexture = Shader.PropertyToID("_VolumetricLightingFroxelTexture");
     internal static readonly int LightingTexture = Shader.PropertyToID("_VolumetricLightingTexture");
     internal static readonly int AdditionalLightsBuffer = Shader.PropertyToID("_VolumetricLightingAdditionalLights");

@@ -196,12 +196,14 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         {
             RenderTextureDescriptor lightingDescriptor = cameraData.cameraTargetDescriptor;
             lightingDescriptor.depthBufferBits = 0;
+            /*resourceData.activeColorTexture.GetDescriptor()
+            lightingDescriptor.depthBufferBits = 0;
             lightingDescriptor.msaaSamples = 1;
             lightingDescriptor.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
             lightingDescriptor.sRGB = false;
             lightingDescriptor.useMipMap = false;
             lightingDescriptor.autoGenerateMips = false;
-            lightingDescriptor.enableRandomWrite = false;
+            lightingDescriptor.enableRandomWrite = false;*/
 
             lightingTexture = UniversalRenderer.CreateRenderGraphTexture(
                 renderGraph,
@@ -217,8 +219,13 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
                    profilingSampler))
         {
             passData.material = compositeMaterial;
-            passData.sourceTexture = renderGraph.defaultResources.blackTexture;
+            passData.sourceTexture = useIntermediateLightingTexture
+                ? resourceData.activeColorTexture
+                : renderGraph.defaultResources.blackTexture;
             passData.cameraDepthTexture = resourceData.cameraDepthTexture;
+            passData.kawaseDepthTexture = settings.enableKawaseBlur
+                ? resourceData.cameraDepthTexture
+                : TextureHandle.nullHandle;
             passData.froxelTexture = froxelTexture;
             passData.gridX = gridX;
             passData.gridY = gridY;
@@ -238,6 +245,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
             builder.UseTexture(passData.sourceTexture, AccessFlags.Read);
             builder.UseTexture(passData.cameraDepthTexture, AccessFlags.Read);
+            if (passData.kawaseDepthTexture.IsValid())
+                builder.UseTexture(passData.kawaseDepthTexture, AccessFlags.Read);
             builder.UseTexture(passData.froxelTexture, AccessFlags.Read);
             if (useIntermediateLightingTexture)
             {
@@ -250,7 +259,13 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
             builder.AllowPassCulling(false);
             builder.AllowGlobalStateModification(true);
-            passData.passIndex = outputIntermediateSolidColor ? 6 : (useIntermediateLightingTexture || outputAccumulation ? 2 : -1);
+            passData.passIndex = outputIntermediateSolidColor
+                ? 6
+                : settings.enableKawaseBlur
+                    ? 7
+                    : useIntermediateLightingTexture || outputAccumulation
+                        ? 2
+                        : -1;
             builder.SetRenderFunc(static (RasterPassData data, RasterGraphContext context) => ExecuteRasterPass(data, context));
         }
 
@@ -466,6 +481,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         if (data.cameraDepthTexture.IsValid())
             data.material.SetTexture(VolumetricLightingShaderIDs.CameraDepthTexture, data.cameraDepthTexture);
+        if (data.kawaseDepthTexture.IsValid())
+            data.material.SetTexture(VolumetricLightingShaderIDs.KawaseDepthTexture, data.kawaseDepthTexture);
         if (data.froxelTexture.IsValid())
             data.material.SetTexture(VolumetricLightingShaderIDs.FroxelTexture, data.froxelTexture);
         if (data.lightingTexture.IsValid())
@@ -522,6 +539,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal Material material;
         internal TextureHandle sourceTexture;
         internal TextureHandle cameraDepthTexture;
+        internal TextureHandle kawaseDepthTexture;
         internal TextureHandle froxelTexture;
         internal TextureHandle lightingTexture;
         internal Matrix4x4 inverseProjection;
