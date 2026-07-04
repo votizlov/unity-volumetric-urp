@@ -30,10 +30,15 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         public bool enableAdditionalLights = false;
         public bool enableKawaseBlur = false;
         [Min(0f)] public float kawaseIteration = 1f;
+        [Tooltip("Run the Kawase blur as a chain of real render passes with growing offsets instead of emulating one iteration in a single pass.")]
+        public bool enableMultipassKawase = false;
+        [Range(1, MaxKawaseBlurPasses)] public int kawaseBlurPassCount = 3;
         public DebugMode debugMode = DebugMode.Off;
         [Range(0f, 1f)] public float debugOpacity = 0.65f;
         public RenderPassEvent renderPassEvent = RenderPassEvent.BeforeRenderingTransparents;
     }
+
+    public const int MaxKawaseBlurPasses = 8;
 
     const string ComputeShaderResourcePath = "VolumetricLighting/VolumetricLightingFroxelUpdate";
     const string CompositeShaderResourcePath = "VolumetricLighting/VolumetricLightingComposite";
@@ -43,10 +48,10 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
     VolumetricLightingRenderPass renderPass;
     ComputeShader froxelUpdateShader;
     Material compositeMaterial;
-    // Second instance of the composite shader used by the blur/debug pass. Both raster passes set
+    // Extra instances of the composite shader, one per blur/debug pass. Every raster pass sets
     // material properties inside RenderGraph render funcs, which all run before the command buffer
-    // executes; sharing one material would let the later pass overwrite the earlier pass's values.
-    Material blurMaterial;
+    // executes; sharing one material would let a later pass overwrite an earlier pass's values.
+    readonly Material[] blurMaterials = new Material[MaxKawaseBlurPasses];
 
     public override void Create()
     {
@@ -72,10 +77,10 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         }
 
         EnsureResources();
-        if (froxelUpdateShader == null || compositeMaterial == null || blurMaterial == null)
+        if (froxelUpdateShader == null || compositeMaterial == null || blurMaterials[0] == null)
             return;
 
-        renderPass.Setup(settings, compositeMaterial, blurMaterial, froxelUpdateShader);
+        renderPass.Setup(settings, compositeMaterial, blurMaterials, froxelUpdateShader);
         renderer.EnqueuePass(renderPass);
     }
 
@@ -87,10 +92,13 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
             CoreUtils.Destroy(compositeMaterial);
             compositeMaterial = null;
         }
-        if (blurMaterial != null)
+        for (int materialIndex = 0; materialIndex < blurMaterials.Length; ++materialIndex)
         {
-            CoreUtils.Destroy(blurMaterial);
-            blurMaterial = null;
+            if (blurMaterials[materialIndex] != null)
+            {
+                CoreUtils.Destroy(blurMaterials[materialIndex]);
+                blurMaterials[materialIndex] = null;
+            }
         }
     }
 
@@ -99,16 +107,26 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         if (froxelUpdateShader == null)
             froxelUpdateShader = Resources.Load<ComputeShader>(ComputeShaderResourcePath);
 
-        if (compositeMaterial == null || blurMaterial == null)
+        Shader compositeShader = null;
+        if (compositeMaterial == null)
         {
-            Shader compositeShader = Resources.Load<Shader>(CompositeShaderResourcePath);
+            compositeShader = Resources.Load<Shader>(CompositeShaderResourcePath);
             if (compositeShader != null)
-            {
-                if (compositeMaterial == null)
-                    compositeMaterial = CoreUtils.CreateEngineMaterial(compositeShader);
-                if (blurMaterial == null)
-                    blurMaterial = CoreUtils.CreateEngineMaterial(compositeShader);
-            }
+                compositeMaterial = CoreUtils.CreateEngineMaterial(compositeShader);
+        }
+
+        int blurMaterialCount = settings.enableMultipassKawase
+            ? Mathf.Clamp(settings.kawaseBlurPassCount, 1, MaxKawaseBlurPasses)
+            : 1;
+        for (int materialIndex = 0; materialIndex < blurMaterialCount; ++materialIndex)
+        {
+            if (blurMaterials[materialIndex] != null)
+                continue;
+            if (compositeShader == null)
+                compositeShader = Resources.Load<Shader>(CompositeShaderResourcePath);
+            if (compositeShader == null)
+                return;
+            blurMaterials[materialIndex] = CoreUtils.CreateEngineMaterial(compositeShader);
         }
     }
 }

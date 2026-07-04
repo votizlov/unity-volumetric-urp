@@ -21,7 +21,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
     VolumetricLightingRendererFeature.Settings settings;
     Material compositeMaterial;
-    Material blurMaterial;
+    Material[] blurMaterials;
     ComputeShader froxelUpdateShader;
     ComputeShader cachedShader;
     GraphicsBuffer additionalLightsBuffer;
@@ -37,11 +37,11 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         ConfigureInput(ScriptableRenderPassInput.Depth);
     }
 
-    public void Setup(VolumetricLightingRendererFeature.Settings sourceSettings, Material sourceMaterial, Material sourceBlurMaterial, ComputeShader sourceShader)
+    public void Setup(VolumetricLightingRendererFeature.Settings sourceSettings, Material sourceMaterial, Material[] sourceBlurMaterials, ComputeShader sourceShader)
     {
         settings = sourceSettings;
         compositeMaterial = sourceMaterial;
-        blurMaterial = sourceBlurMaterial;
+        blurMaterials = sourceBlurMaterials;
         froxelUpdateShader = sourceShader;
         renderPassEvent = settings.renderPassEvent;
 
@@ -73,7 +73,9 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         if (settings == null
             || compositeMaterial == null
-            || blurMaterial == null
+            || blurMaterials == null
+            || blurMaterials.Length == 0
+            || blurMaterials[0] == null
             || froxelUpdateShader == null
             || computeKernelIndex < 0
             || !SystemInfo.supportsComputeShaders)
@@ -194,18 +196,18 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             builder.SetRenderFunc(static (ComputePassData data, ComputeGraphContext context) => ExecuteComputePass(data, context));
         }
 
+        RenderTextureDescriptor lightingDescriptor = cameraData.cameraTargetDescriptor;
+        lightingDescriptor.depthBufferBits = 0;
+        lightingDescriptor.msaaSamples = 1;
+        lightingDescriptor.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
+        lightingDescriptor.sRGB = false;
+        lightingDescriptor.useMipMap = false;
+        lightingDescriptor.autoGenerateMips = false;
+        lightingDescriptor.enableRandomWrite = false;
+
         TextureHandle lightingTexture = TextureHandle.nullHandle;
         if (useIntermediateLightingTexture)
         {
-            RenderTextureDescriptor lightingDescriptor = cameraData.cameraTargetDescriptor;
-            lightingDescriptor.depthBufferBits = 0;
-            lightingDescriptor.msaaSamples = 1;
-            lightingDescriptor.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
-            lightingDescriptor.sRGB = false;
-            lightingDescriptor.useMipMap = false;
-            lightingDescriptor.autoGenerateMips = false;
-            lightingDescriptor.enableRandomWrite = false;
-
             lightingTexture = UniversalRenderer.CreateRenderGraphTexture(
                 renderGraph,
                 lightingDescriptor,
@@ -265,30 +267,79 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
         if (useIntermediateLightingTexture)
         {
-            using IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass<RasterPassData>(
-                outputIntermediateTexture
-                    ? "Volumetric Lighting Debug Intermediate"
-                    : outputBlurredTexture
-                        ? "Volumetric Lighting Debug Blurred"
-                        : "Volumetric Lighting Kawase Blur",
-                out RasterPassData passData,
-                profilingSampler);
+            int finalPassIndex = outputIntermediateTexture ? 4 : outputBlurredTexture ? 5 : 3;
+            float baseKawaseIteration = Mathf.Max(0f, settings.kawaseIteration);
 
-            passData.material = blurMaterial;
-            passData.sourceTexture = lightingTexture;
-            passData.lightingTexture = lightingTexture;
-            passData.screenWidth = cameraData.cameraTargetDescriptor.width;
-            passData.screenHeight = cameraData.cameraTargetDescriptor.height;
-            passData.mainLightColor = lightColor;
-            passData.kawaseIteration = Mathf.Max(0f, settings.kawaseIteration);
+            int blurPassCount = 1;
+            if (finalPassIndex == 3 && settings.enableKawaseBlur && settings.enableMultipassKawase)
+            {
+                int requestedPasses = Mathf.Clamp(settings.kawaseBlurPassCount, 1, blurMaterials.Length);
+                while (blurPassCount < requestedPasses && blurMaterials[blurPassCount] != null)
+                    ++blurPassCount;
+            }
 
-            builder.UseTexture(passData.sourceTexture, AccessFlags.Read);
-            builder.UseTexture(lightingTexture, AccessFlags.Read);
-            builder.SetRenderAttachment(resourceData.activeColorTexture, 0, AccessFlags.WriteAll);
-            builder.AllowPassCulling(false);
-            builder.AllowGlobalStateModification(true);
-            passData.passIndex = outputIntermediateTexture ? 4 : outputBlurredTexture ? 5 : 3;
-            builder.SetRenderFunc(static (RasterPassData data, RasterGraphContext context) => ExecuteRasterPass(data, context));
+            TextureHandle blurSource = lightingTexture;
+            if (blurPassCount > 1)
+            {
+                TextureHandle blurPingPongTexture = UniversalRenderer.CreateRenderGraphTexture(
+                    renderGraph,
+                    lightingDescriptor,
+                    "VolumetricLighting.KawaseBlurTexture",
+                    false,
+                    FilterMode.Bilinear);
+
+                for (int blurPassIndex = 0; blurPassIndex < blurPassCount - 1; ++blurPassIndex)
+                {
+                    TextureHandle blurDestination = (blurPassIndex & 1) == 0 ? blurPingPongTexture : lightingTexture;
+                    using (IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass<RasterPassData>(
+                               "Volumetric Lighting Kawase Blur Iterate",
+                               out RasterPassData passData,
+                               profilingSampler))
+                    {
+                        passData.material = blurMaterials[blurPassIndex];
+                        passData.sourceTexture = blurSource;
+                        passData.lightingTexture = blurSource;
+                        passData.screenWidth = cameraData.cameraTargetDescriptor.width;
+                        passData.screenHeight = cameraData.cameraTargetDescriptor.height;
+                        passData.mainLightColor = lightColor;
+                        passData.kawaseIteration = baseKawaseIteration + blurPassIndex;
+                        passData.passIndex = 7;
+
+                        builder.UseTexture(passData.sourceTexture, AccessFlags.Read);
+                        builder.SetRenderAttachment(blurDestination, 0, AccessFlags.WriteAll);
+                        builder.AllowPassCulling(false);
+                        builder.AllowGlobalStateModification(true);
+                        builder.SetRenderFunc(static (RasterPassData data, RasterGraphContext context) => ExecuteRasterPass(data, context));
+                    }
+
+                    blurSource = blurDestination;
+                }
+            }
+
+            using (IRasterRenderGraphBuilder builder = renderGraph.AddRasterRenderPass<RasterPassData>(
+                       outputIntermediateTexture
+                           ? "Volumetric Lighting Debug Intermediate"
+                           : outputBlurredTexture
+                               ? "Volumetric Lighting Debug Blurred"
+                               : "Volumetric Lighting Kawase Blur",
+                       out RasterPassData passData,
+                       profilingSampler))
+            {
+                passData.material = blurMaterials[blurPassCount - 1];
+                passData.sourceTexture = blurSource;
+                passData.lightingTexture = blurSource;
+                passData.screenWidth = cameraData.cameraTargetDescriptor.width;
+                passData.screenHeight = cameraData.cameraTargetDescriptor.height;
+                passData.mainLightColor = lightColor;
+                passData.kawaseIteration = baseKawaseIteration + (blurPassCount - 1);
+
+                builder.UseTexture(passData.sourceTexture, AccessFlags.Read);
+                builder.SetRenderAttachment(resourceData.activeColorTexture, 0, AccessFlags.WriteAll);
+                builder.AllowPassCulling(false);
+                builder.AllowGlobalStateModification(true);
+                passData.passIndex = finalPassIndex;
+                builder.SetRenderFunc(static (RasterPassData data, RasterGraphContext context) => ExecuteRasterPass(data, context));
+            }
         }
     }
 

@@ -50,6 +50,13 @@ float VolumetricLighting_Hash11(float value)
     return frac(sin(value * 12.9898) * 43758.5453);
 }
 
+// Interleaved gradient noise (Jimenez 2014). Evenly distributed across neighboring pixels,
+// so ray-march banding dithers into high-frequency noise that a small blur averages away.
+float VolumetricLighting_InterleavedGradientNoise(float2 pixelCoord)
+{
+    return frac(52.9829189 * frac(dot(pixelCoord, float2(0.06711056, 0.00583715))));
+}
+
 float3 VolumetricLighting_HashColor(int3 cell)
 {
     float seed = dot(float3(cell), float3(17.0, 59.4, 113.0));

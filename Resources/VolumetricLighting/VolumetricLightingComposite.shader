@@ -75,7 +75,7 @@ Shader "Hidden/VolumetricLighting/Composite"
 
                 int stepCount = max(_VolumetricLightingStepCount, 1);
                 float stepLength = (rayEnd - nearDepth) / stepCount;
-                float jitter = (VolumetricLighting_Hash11(dot(uv, float2(91.7, 317.3))) - 0.5) * _VolumetricLightingJitterStrength;
+                float jitter = (VolumetricLighting_InterleavedGradientNoise(uv * _VolumetricLightingScreenSize.xy) - 0.5) * _VolumetricLightingJitterStrength;
                 float3 accumulated = 0.0.xxx;
 
                 [loop]
@@ -275,7 +275,7 @@ Shader "Hidden/VolumetricLighting/Composite"
 
                 int stepCount = max(_VolumetricLightingStepCount, 1);
                 float stepLength = (rayEnd - nearDepth) / stepCount;
-                float jitter = (VolumetricLighting_Hash11(dot(uv, float2(91.7, 317.3))) - 0.5) * _VolumetricLightingJitterStrength;
+                float jitter = (VolumetricLighting_InterleavedGradientNoise(uv * _VolumetricLightingScreenSize.xy) - 0.5) * _VolumetricLightingJitterStrength;
                 float3 accumulated = 0.0.xxx;
 
                 [loop]
@@ -552,6 +552,85 @@ Shader "Hidden/VolumetricLighting/Composite"
             half4 FragDebugIntermediateSolidColor(Varyings input) : SV_Target
             {
                 return half4(1.0h, 0.0h, 0.0h, 1.0h);
+            }
+            ENDHLSL
+        }
+
+        Pass
+        {
+            Name "KawaseBlurIterate"
+            Cull Off
+            ZWrite Off
+            ZTest Always
+
+            HLSLPROGRAM
+            #pragma vertex Vert
+            #pragma fragment FragKawaseIterate
+            #pragma target 4.5
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "Assets/Packages/VolumetricLighting/Resources/VolumetricLighting/VolumetricLightingCommon.hlsl"
+            TEXTURE2D_X(_VolumetricLightingTexture);
+
+            CBUFFER_START(UnityPerMaterial)
+            float4 _VolumetricLightingScreenSize;
+            float _VolumetricLightingKawaseIteration;
+            CBUFFER_END
+
+            struct Attributes
+            {
+                uint vertexID : SV_VertexID;
+            };
+
+            struct Varyings
+            {
+                float4 positionCS : SV_POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            Varyings Vert(Attributes input)
+            {
+                Varyings output;
+                output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                return output;
+            }
+
+            half3 KawaseBlurFilter(half2 texCoord, half2 pixelSize, half iteration)
+            {
+                half2 texCoordSample;
+                half2 halfPixelSize = pixelSize * 0.5h;
+                half2 dUV = (pixelSize.xy * half2(iteration, iteration)) + halfPixelSize.xy;
+
+                half3 cOut;
+
+                texCoordSample.x = texCoord.x - dUV.x;
+                texCoordSample.y = texCoord.y + dUV.y;
+                cOut = SAMPLE_TEXTURE2D_X(_VolumetricLightingTexture, sampler_LinearClamp, texCoordSample).rgb;
+
+                texCoordSample.x = texCoord.x + dUV.x;
+                texCoordSample.y = texCoord.y + dUV.y;
+                cOut += SAMPLE_TEXTURE2D_X(_VolumetricLightingTexture, sampler_LinearClamp, texCoordSample).rgb;
+
+                texCoordSample.x = texCoord.x + dUV.x;
+                texCoordSample.y = texCoord.y - dUV.y;
+                cOut += SAMPLE_TEXTURE2D_X(_VolumetricLightingTexture, sampler_LinearClamp, texCoordSample).rgb;
+
+                texCoordSample.x = texCoord.x - dUV.x;
+                texCoordSample.y = texCoord.y - dUV.y;
+                cOut += SAMPLE_TEXTURE2D_X(_VolumetricLightingTexture, sampler_LinearClamp, texCoordSample).rgb;
+
+                cOut *= 0.25h;
+                return cOut;
+            }
+
+            half4 FragKawaseIterate(Varyings input) : SV_Target
+            {
+                half2 pixelSize = half2(_VolumetricLightingScreenSize.z, _VolumetricLightingScreenSize.w);
+                // Read/write flip cancels out per iteration: reading with the flip and writing with the
+                // fullscreen triangle keeps the chained texture in the same orientation as the source.
+                half3 blurred = KawaseBlurFilter((half2)VolumetricLighting_GetDepthUv(input.uv), pixelSize, (half)_VolumetricLightingKawaseIteration);
+                return half4(blurred, 1.0h);
             }
             ENDHLSL
         }
