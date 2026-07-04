@@ -43,6 +43,10 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
     VolumetricLightingRenderPass renderPass;
     ComputeShader froxelUpdateShader;
     Material compositeMaterial;
+    // Second instance of the composite shader used by the blur/debug pass. Both raster passes set
+    // material properties inside RenderGraph render funcs, which all run before the command buffer
+    // executes; sharing one material would let the later pass overwrite the earlier pass's values.
+    Material blurMaterial;
 
     public override void Create()
     {
@@ -68,10 +72,10 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         }
 
         EnsureResources();
-        if (froxelUpdateShader == null || compositeMaterial == null)
+        if (froxelUpdateShader == null || compositeMaterial == null || blurMaterial == null)
             return;
 
-        renderPass.Setup(settings, compositeMaterial, froxelUpdateShader);
+        renderPass.Setup(settings, compositeMaterial, blurMaterial, froxelUpdateShader);
         renderer.EnqueuePass(renderPass);
     }
 
@@ -83,6 +87,11 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
             CoreUtils.Destroy(compositeMaterial);
             compositeMaterial = null;
         }
+        if (blurMaterial != null)
+        {
+            CoreUtils.Destroy(blurMaterial);
+            blurMaterial = null;
+        }
     }
 
     void EnsureResources()
@@ -90,11 +99,16 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         if (froxelUpdateShader == null)
             froxelUpdateShader = Resources.Load<ComputeShader>(ComputeShaderResourcePath);
 
-        if (compositeMaterial == null)
+        if (compositeMaterial == null || blurMaterial == null)
         {
             Shader compositeShader = Resources.Load<Shader>(CompositeShaderResourcePath);
             if (compositeShader != null)
-                compositeMaterial = CoreUtils.CreateEngineMaterial(compositeShader);
+            {
+                if (compositeMaterial == null)
+                    compositeMaterial = CoreUtils.CreateEngineMaterial(compositeShader);
+                if (blurMaterial == null)
+                    blurMaterial = CoreUtils.CreateEngineMaterial(compositeShader);
+            }
         }
     }
 }
