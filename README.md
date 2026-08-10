@@ -10,6 +10,7 @@ Designed to add visible light beams, atmospheric depth, and shadowed volumetric 
 
 - Main directional light volumetrics
 - Additional point and spot light volumetrics
+- Independent RGB volumetric cookies for selected spot lights
 - Shadowed light scattering
 - Per-light opt-in control through `Runtime/VolumetricLight.cs`
 - Independent toggles for direct lighting and additional lights
@@ -35,6 +36,7 @@ Lights without `VolumetricLight` are ignored by the volumetric pass.
 - `compositeDepthBias` for compositing control
 - `enableDirectLighting` to allow or disable main directional light scattering
 - `enableAdditionalLights` to allow or disable point and spot light scattering
+- `cookieAtlasResolution` for the package-owned volumetric cookie atlas (defaults to 1024)
 - `enableKawaseBlur` and `kawaseIteration` for post blur
 - `debugMode` and `debugOpacity` for visualization
 - `renderPassEvent` for integration timing
@@ -46,3 +48,21 @@ Attach `VolumetricLight` to any light you want processed by the volumetric syste
 - `processVolumetricLighting = true` includes the light
 - `processVolumetricLighting = false` excludes the light
 - disabling the component also excludes the light
+
+## Volumetric Spot Light Cookies
+
+Volumetric cookies are independent from Unity's `Light.cookie`, so the pattern in the
+volume can differ from the pattern used for surface lighting.
+
+1. Select a spot light with a `VolumetricLight` component.
+2. Enable **Apply Cookie** in the **Volumetric Cookie** section.
+3. Assign an RGB `Texture2D` to **Cookie**.
+
+The toggle is disabled by default. Point and directional lights ignore these fields.
+An enabled light with no assigned texture continues to render without cookie modulation.
+
+Visible volumetric cookies share a bilinear, mipless atlas owned by the renderer feature.
+The atlas resolution is rounded to a power of two between 128 and 4096. When the active
+textures do not fit, the system repacks and uniformly downsizes them. If the atlas still
+overflows, affected lights remain visible without cookie modulation and a throttled warning
+is logged. Increase `cookieAtlasResolution` when cookie detail or capacity is insufficient.

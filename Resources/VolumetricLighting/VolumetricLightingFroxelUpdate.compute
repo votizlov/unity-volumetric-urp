@@ -6,6 +6,7 @@
 #pragma multi_compile _ _SHADOWS_SOFT
 #pragma multi_compile _ _VL_DIRECT_LIGHTING
 #pragma multi_compile _ _VL_ADDITIONAL_LIGHTS
+#pragma multi_compile _ _VL_VOLUMETRIC_COOKIES
 
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
@@ -20,9 +21,18 @@ struct VolumetricLightingAdditionalLight
     float4 extraData;
 };
 
+struct VolumetricLightingCookieData
+{
+    float4x4 worldToCookie;
+    float4 atlasRect;
+};
+
 TEXTURE2D_X(_CameraDepthTexture);
+TEXTURE2D(_VolumetricLightingCookieAtlas);
+SAMPLER(sampler_VolumetricLightingCookieAtlas);
 RW_TEXTURE3D(float4, _VolumetricLightingFroxelTexture);
 StructuredBuffer<VolumetricLightingAdditionalLight> _VolumetricLightingAdditionalLights;
+StructuredBuffer<VolumetricLightingCookieData> _VolumetricLightingCookieData;
 
 float4 _VolumetricLightingGridParams;
 float4 _VolumetricLightingScreenSize;
@@ -32,6 +42,30 @@ float4x4 _VolumetricLightingCameraToWorldMatrix;
 float4 _VolumetricLightingMainLightDirection;
 float4 _VolumetricLightingMainLightColor;
 int _VolumetricLightingAdditionalLightCount;
+int _VolumetricLightingCookieDataCount;
+
+half3 SampleVolumetricCookie(int cookieIndex, float3 worldPosition)
+{
+#if defined(_VL_VOLUMETRIC_COOKIES)
+    if (cookieIndex < 0 || cookieIndex >= _VolumetricLightingCookieDataCount)
+        return half3(1.0, 1.0, 1.0);
+
+    VolumetricLightingCookieData cookieData = _VolumetricLightingCookieData[cookieIndex];
+    float4 cookiePosition = mul(cookieData.worldToCookie, float4(worldPosition, 1.0));
+    if (cookiePosition.w <= VOLUMETRIC_LIGHTING_EPSILON)
+        return half3(0.0, 0.0, 0.0);
+
+    float2 cookieUv = saturate(cookiePosition.xy / cookiePosition.w * 0.5 + 0.5);
+    float2 atlasUv = cookieUv * cookieData.atlasRect.xy + cookieData.atlasRect.zw;
+    return SAMPLE_TEXTURE2D_LOD(
+        _VolumetricLightingCookieAtlas,
+        sampler_VolumetricLightingCookieAtlas,
+        atlasUv,
+        0.0).rgb;
+#else
+    return half3(1.0, 1.0, 1.0);
+#endif
+}
 
 [numthreads(4, 4, 4)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
@@ -85,13 +119,15 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         if (lightData.extraData.y > 0.5)
             attenuation *= AngleAttenuation(lightData.spotDirection.xyz, lightDirection, lightData.attenuation.zw);
 
+        half3 cookieColor = SampleVolumetricCookie((int)lightData.extraData.z, worldPosition);
+
         #if defined(_ADDITIONAL_LIGHT_SHADOWS)
         half additionalShadow = AdditionalLightRealtimeShadow((int)lightData.extraData.x, worldPosition, lightDirection);
         #else
         half additionalShadow = half(1.0);
         #endif
 
-        lighting += lightData.color.rgb * (attenuation * additionalShadow);
+        lighting += lightData.color.rgb * cookieColor * (attenuation * additionalShadow);
     }
 #endif
 

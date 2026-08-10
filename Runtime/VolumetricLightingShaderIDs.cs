@@ -4,12 +4,16 @@ static class VolumetricLightingShaderIDs
 {
     internal const string DirectLightingKeyword = "_VL_DIRECT_LIGHTING";
     internal const string AdditionalLightsKeyword = "_VL_ADDITIONAL_LIGHTS";
+    internal const string VolumetricCookiesKeyword = "_VL_VOLUMETRIC_COOKIES";
 
     internal static readonly int CameraDepthTexture = Shader.PropertyToID("_CameraDepthTexture");
     internal static readonly int FroxelTexture = Shader.PropertyToID("_VolumetricLightingFroxelTexture");
     internal static readonly int LightingTexture = Shader.PropertyToID("_VolumetricLightingTexture");
     internal static readonly int AdditionalLightsBuffer = Shader.PropertyToID("_VolumetricLightingAdditionalLights");
     internal static readonly int AdditionalLightCount = Shader.PropertyToID("_VolumetricLightingAdditionalLightCount");
+    internal static readonly int CookieAtlas = Shader.PropertyToID("_VolumetricLightingCookieAtlas");
+    internal static readonly int CookieDataBuffer = Shader.PropertyToID("_VolumetricLightingCookieData");
+    internal static readonly int CookieDataCount = Shader.PropertyToID("_VolumetricLightingCookieDataCount");
     internal static readonly int GridParams = Shader.PropertyToID("_VolumetricLightingGridParams");
     internal static readonly int ScreenSize = Shader.PropertyToID("_VolumetricLightingScreenSize");
     internal static readonly int VolumeParams = Shader.PropertyToID("_VolumetricLightingVolumeParams");

@@ -28,6 +28,10 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         [Min(0f)] public float compositeDepthBias = 0.01f;
         public bool enableDirectLighting = true;
         public bool enableAdditionalLights = false;
+        [Header("Volumetric Cookies")]
+        [Tooltip("Resolution of the RGB atlas used by independently assigned volumetric spot light cookies. Rounded to a power of two between 128 and 4096.")]
+        [Min(128)] public int cookieAtlasResolution = 1024;
+        [Header("Kawase Blur")]
         public bool enableKawaseBlur = false;
         [Min(0f)] public float kawaseIteration = 1f;
         [Tooltip("Run the Kawase blur as a chain of real render passes with growing offsets instead of emulating one iteration in a single pass.")]

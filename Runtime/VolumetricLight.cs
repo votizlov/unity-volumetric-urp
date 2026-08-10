@@ -7,6 +7,12 @@ public sealed class VolumetricLight : MonoBehaviour
 {
     public bool processVolumetricLighting = true;
 
+    [Header("Volumetric Cookie")]
+    [Tooltip("Apply the independently assigned volumetric cookie to this light. Only spot lights support volumetric cookies.")]
+    public bool applyVolumetricCookie;
+    [Tooltip("RGB texture projected through the spot light cone. This does not use or modify Light.cookie.")]
+    public Texture2D volumetricCookie;
+
     [Header("Baked Light Shafts")]
     [FormerlySerializedAs("bakedShaftDistance")]
     [Min(0.01f)] public float bakedShaftLength = 12f;

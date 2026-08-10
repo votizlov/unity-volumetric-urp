@@ -8,6 +8,10 @@ using System.Runtime.InteropServices;
 public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 {
     const string ComputeKernelName = "CSMain";
+    const int MinCookieAtlasResolution = 128;
+    const int MaxCookieAtlasResolution = 4096;
+    const int MaxCookieSizeDivisor = 16;
+    const int CookieWarningIntervalFrames = 300;
 
     [StructLayout(LayoutKind.Sequential)]
     struct AdditionalLightGpuData
@@ -19,6 +23,13 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal Vector4 extraData;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    struct VolumetricCookieGpuData
+    {
+        internal Matrix4x4 worldToCookie;
+        internal Vector4 atlasRect;
+    }
+
     VolumetricLightingRendererFeature.Settings settings;
     Material compositeMaterial;
     Material[] blurMaterials;
@@ -26,6 +37,20 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     ComputeShader cachedShader;
     GraphicsBuffer additionalLightsBuffer;
     AdditionalLightGpuData[] additionalLightsCpuData = System.Array.Empty<AdditionalLightGpuData>();
+    Texture2D[] additionalLightCookieTextures = System.Array.Empty<Texture2D>();
+    Matrix4x4[] additionalLightCookieMatrices = System.Array.Empty<Matrix4x4>();
+    GraphicsBuffer cookieDataBuffer;
+    VolumetricCookieGpuData[] cookieDataCpuData = System.Array.Empty<VolumetricCookieGpuData>();
+    Texture2D[] uniqueCookieTextures = System.Array.Empty<Texture2D>();
+    Vector4[] uniqueCookieAtlasRects = System.Array.Empty<Vector4>();
+    Vector2Int[] uniqueCookieAtlasSizes = System.Array.Empty<Vector2Int>();
+    Texture2DAtlas cookieAtlas;
+    int cookieAtlasResolution;
+    int cookieSizeDivisor = 1;
+    long previousCookieRequestPixelCount = long.MaxValue;
+    int activeUniqueCookieCount;
+    int lastCookieWarningFrame = -CookieWarningIntervalFrames;
+    bool cookieAtlasNeedsClear;
     int computeKernelIndex = -1;
     int threadGroupSizeX = 4;
     int threadGroupSizeY = 4;
@@ -67,6 +92,10 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         additionalLightsBuffer?.Release();
         additionalLightsBuffer = null;
+        cookieDataBuffer?.Release();
+        cookieDataBuffer = null;
+        cookieAtlas?.Release();
+        cookieAtlas = null;
     }
 
     public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -149,13 +178,21 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         Color lightColor = hasMainDirectionalLight
             ? lightData.visibleLights[lightData.mainLightIndex].finalColor
             : Color.black;
+        int cookieDataCount = 0;
         int additionalLightCount = requestAdditionalLights
-            ? UpdateAdditionalLightsBuffer(lightData)
+            ? UpdateAdditionalLightsBuffer(lightData, out cookieDataCount)
             : 0;
         bool enableAdditionalLights = requestAdditionalLights && additionalLightCount > 0;
 
         if (!enableDirectLighting && !enableAdditionalLights)
             return;
+
+        TextureHandle cookieAtlasTexture = default;
+        if (enableAdditionalLights && cookieDataCount > 0)
+        {
+            cookieAtlasTexture = renderGraph.ImportTexture(cookieAtlas.AtlasTexture);
+            RecordCookieAtlasUpdatePass(renderGraph, cookieAtlasTexture);
+        }
 
         using (IComputeRenderGraphBuilder builder = renderGraph.AddComputePass<ComputePassData>(
                    "Volumetric Lighting Froxel Update",
@@ -169,7 +206,12 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             passData.additionalLightsBuffer = additionalLightCount > 0
                 ? renderGraph.ImportBuffer(additionalLightsBuffer)
                 : default;
+            passData.cookieAtlasTexture = cookieAtlasTexture;
+            passData.cookieDataBuffer = cookieDataCount > 0
+                ? renderGraph.ImportBuffer(cookieDataBuffer)
+                : default;
             passData.additionalLightCount = additionalLightCount;
+            passData.cookieDataCount = cookieDataCount;
             passData.gridX = gridX;
             passData.gridY = gridY;
             passData.gridZ = gridZ;
@@ -191,6 +233,11 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             builder.UseTexture(passData.froxelTexture, AccessFlags.Write);
             if (additionalLightCount > 0)
                 builder.UseBuffer(passData.additionalLightsBuffer, AccessFlags.Read);
+            if (cookieDataCount > 0)
+            {
+                builder.UseTexture(passData.cookieAtlasTexture, AccessFlags.Read);
+                builder.UseBuffer(passData.cookieDataBuffer, AccessFlags.Read);
+            }
             builder.AllowPassCulling(false);
             builder.AllowGlobalStateModification(true);
             builder.SetRenderFunc(static (ComputePassData data, ComputeGraphContext context) => ExecuteComputePass(data, context));
@@ -360,6 +407,12 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         else
             context.cmd.DisableKeyword(data.computeShader, additionalLightsKeyword);
 
+        LocalKeyword volumetricCookiesKeyword = new(data.computeShader, VolumetricLightingShaderIDs.VolumetricCookiesKeyword);
+        if (data.cookieDataCount > 0)
+            context.cmd.EnableKeyword(data.computeShader, volumetricCookiesKeyword);
+        else
+            context.cmd.DisableKeyword(data.computeShader, volumetricCookiesKeyword);
+
         context.cmd.SetComputeTextureParam(
             data.computeShader,
             data.computeKernelIndex,
@@ -377,6 +430,19 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
                 data.computeKernelIndex,
                 VolumetricLightingShaderIDs.AdditionalLightsBuffer,
                 data.additionalLightsBuffer);
+        }
+        if (data.cookieDataCount > 0)
+        {
+            context.cmd.SetComputeTextureParam(
+                data.computeShader,
+                data.computeKernelIndex,
+                VolumetricLightingShaderIDs.CookieAtlas,
+                data.cookieAtlasTexture);
+            context.cmd.SetComputeBufferParam(
+                data.computeShader,
+                data.computeKernelIndex,
+                VolumetricLightingShaderIDs.CookieDataBuffer,
+                data.cookieDataBuffer);
         }
         context.cmd.SetComputeVectorParam(
             data.computeShader,
@@ -410,6 +476,10 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             data.computeShader,
             VolumetricLightingShaderIDs.AdditionalLightCount,
             data.additionalLightCount);
+        context.cmd.SetComputeIntParam(
+            data.computeShader,
+            VolumetricLightingShaderIDs.CookieDataCount,
+            data.cookieDataCount);
         context.cmd.DispatchCompute(
             data.computeShader,
             data.computeKernelIndex,
@@ -418,7 +488,48 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             data.dispatchGroupsZ);
     }
 
-    int UpdateAdditionalLightsBuffer(UniversalLightData lightData)
+    void RecordCookieAtlasUpdatePass(RenderGraph renderGraph, TextureHandle cookieAtlasTexture)
+    {
+        using (IUnsafeRenderGraphBuilder builder = renderGraph.AddUnsafePass<CookieAtlasPassData>(
+                   "Volumetric Lighting Cookie Atlas Update",
+                   out CookieAtlasPassData passData,
+                   profilingSampler))
+        {
+            passData.atlas = cookieAtlas;
+            passData.atlasTexture = cookieAtlasTexture;
+            passData.cookieTextures = uniqueCookieTextures;
+            passData.atlasRects = uniqueCookieAtlasRects;
+            passData.cookieCount = activeUniqueCookieCount;
+            passData.clearAtlas = cookieAtlasNeedsClear;
+
+            builder.UseTexture(passData.atlasTexture, AccessFlags.ReadWrite);
+            builder.AllowPassCulling(false);
+            builder.SetRenderFunc(static (CookieAtlasPassData data, UnsafeGraphContext context) =>
+            {
+                CommandBuffer commandBuffer = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+                if (data.clearAtlas)
+                    data.atlas.ClearTarget(commandBuffer);
+
+                for (int cookieIndex = 0; cookieIndex < data.cookieCount; ++cookieIndex)
+                {
+                    Texture2D cookieTexture = data.cookieTextures[cookieIndex];
+                    if (cookieTexture == null || data.atlasRects[cookieIndex] == Vector4.zero)
+                        continue;
+
+                    data.atlas.UpdateTexture(
+                        commandBuffer,
+                        cookieTexture,
+                        ref data.atlasRects[cookieIndex],
+                        true,
+                        false);
+                }
+            });
+        }
+
+        cookieAtlasNeedsClear = false;
+    }
+
+    int UpdateAdditionalLightsBuffer(UniversalLightData lightData, out int cookieDataCount)
     {
         int additionalVisibleLightIndex = 0;
         int bufferLightCount = 0;
@@ -435,18 +546,32 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             if (light == null)
                 continue;
 
-            if (!ShouldProcessLight(light))
+            if (!light.TryGetComponent(out VolumetricLight volumetricLight) || !volumetricLight.ShouldProcess)
                 continue;
 
             if (visibleLight.lightType != LightType.Point && visibleLight.lightType != LightType.Spot)
                 continue;
 
             EnsureAdditionalLightsCpuCapacity(bufferLightCount + 1);
-            additionalLightsCpuData[bufferLightCount++] = CreateAdditionalLightGpuData(visibleLight, light, shadowLightIndex);
+            additionalLightsCpuData[bufferLightCount] = CreateAdditionalLightGpuData(visibleLight, light, shadowLightIndex);
+            additionalLightCookieTextures[bufferLightCount] = visibleLight.lightType == LightType.Spot
+                && volumetricLight.applyVolumetricCookie
+                ? volumetricLight.volumetricCookie
+                : null;
+            additionalLightCookieMatrices[bufferLightCount] = additionalLightCookieTextures[bufferLightCount] != null
+                ? CreateSpotCookieMatrix(visibleLight)
+                : Matrix4x4.identity;
+            ++bufferLightCount;
         }
 
         if (bufferLightCount <= 0)
+        {
+            cookieDataCount = 0;
+            activeUniqueCookieCount = 0;
             return 0;
+        }
+
+        cookieDataCount = PrepareCookieData(bufferLightCount);
 
         int stride = Marshal.SizeOf<AdditionalLightGpuData>();
         if (additionalLightsBuffer == null || additionalLightsBuffer.count < bufferLightCount || additionalLightsBuffer.stride != stride)
@@ -466,6 +591,280 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
         int newSize = Mathf.NextPowerOfTwo(Mathf.Max(1, count));
         additionalLightsCpuData = new AdditionalLightGpuData[newSize];
+        additionalLightCookieTextures = new Texture2D[newSize];
+        additionalLightCookieMatrices = new Matrix4x4[newSize];
+    }
+
+    int PrepareCookieData(int lightCount)
+    {
+        activeUniqueCookieCount = BuildUniqueCookieList(lightCount);
+        if (activeUniqueCookieCount <= 0)
+            return 0;
+
+        EnsureCookieAtlas(settings.cookieAtlasResolution);
+        cookieAtlasNeedsClear = false;
+
+        long cookieRequestPixelCount = GetCookieRequestPixelCount();
+        long atlasPixelCount = (long)cookieAtlasResolution * cookieAtlasResolution;
+        int approximateDivisor = Mathf.Max(1, Mathf.CeilToInt(Mathf.Sqrt(cookieRequestPixelCount / (float)atlasPixelCount)));
+        bool canRecoverResolution = cookieSizeDivisor > approximateDivisor
+            && cookieRequestPixelCount < previousCookieRequestPixelCount;
+        if (canRecoverResolution || !TryAllocateCookies(cookieSizeDivisor, true))
+            RepackActiveCookies();
+        previousCookieRequestPixelCount = cookieRequestPixelCount;
+
+        int cookieDataCount = 0;
+        int failedCookieLightCount = 0;
+        EnsureCookieDataCpuCapacity(lightCount);
+
+        for (int lightIndex = 0; lightIndex < lightCount; ++lightIndex)
+        {
+            Texture2D cookieTexture = additionalLightCookieTextures[lightIndex];
+            if (cookieTexture == null)
+                continue;
+
+            int uniqueCookieIndex = FindUniqueCookieIndex(cookieTexture);
+            if (uniqueCookieIndex < 0 || uniqueCookieAtlasRects[uniqueCookieIndex] == Vector4.zero)
+            {
+                ++failedCookieLightCount;
+                continue;
+            }
+
+            cookieDataCpuData[cookieDataCount] = new VolumetricCookieGpuData
+            {
+                worldToCookie = additionalLightCookieMatrices[lightIndex],
+                atlasRect = ShrinkCookieAtlasRect(
+                    uniqueCookieAtlasRects[uniqueCookieIndex],
+                    uniqueCookieAtlasSizes[uniqueCookieIndex])
+            };
+
+            AdditionalLightGpuData lightData = additionalLightsCpuData[lightIndex];
+            lightData.extraData.z = cookieDataCount;
+            additionalLightsCpuData[lightIndex] = lightData;
+            ++cookieDataCount;
+        }
+
+        if (failedCookieLightCount > 0 && Time.frameCount - lastCookieWarningFrame >= CookieWarningIntervalFrames)
+        {
+            Debug.LogWarning(
+                $"Volumetric cookie atlas ({cookieAtlasResolution}x{cookieAtlasResolution}) could not fit "
+                + $"{failedCookieLightCount} visible spot light cookie(s). Those lights will render unmodulated.");
+            lastCookieWarningFrame = Time.frameCount;
+        }
+
+        if (cookieDataCount <= 0)
+            return 0;
+
+        int stride = Marshal.SizeOf<VolumetricCookieGpuData>();
+        if (cookieDataBuffer == null || cookieDataBuffer.count < cookieDataCount || cookieDataBuffer.stride != stride)
+        {
+            cookieDataBuffer?.Release();
+            cookieDataBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Structured, cookieDataCount, stride);
+        }
+
+        cookieDataBuffer.SetData(cookieDataCpuData, 0, 0, cookieDataCount);
+        return cookieDataCount;
+    }
+
+    int BuildUniqueCookieList(int lightCount)
+    {
+        int uniqueCount = 0;
+        EnsureUniqueCookieCapacity(lightCount);
+
+        for (int lightIndex = 0; lightIndex < lightCount; ++lightIndex)
+        {
+            Texture2D cookieTexture = additionalLightCookieTextures[lightIndex];
+            if (cookieTexture == null)
+                continue;
+
+            bool alreadyAdded = false;
+            for (int cookieIndex = 0; cookieIndex < uniqueCount; ++cookieIndex)
+            {
+                if (uniqueCookieTextures[cookieIndex] == cookieTexture)
+                {
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+
+            if (!alreadyAdded)
+                uniqueCookieTextures[uniqueCount++] = cookieTexture;
+        }
+
+        // Larger textures first gives the static atlas allocator a more reliable packing order.
+        for (int cookieIndex = 1; cookieIndex < uniqueCount; ++cookieIndex)
+        {
+            Texture2D texture = uniqueCookieTextures[cookieIndex];
+            long area = (long)texture.width * texture.height;
+            int insertionIndex = cookieIndex;
+            while (insertionIndex > 0)
+            {
+                Texture2D previous = uniqueCookieTextures[insertionIndex - 1];
+                long previousArea = (long)previous.width * previous.height;
+                if (previousArea > area
+                    || (previousArea == area && previous.GetInstanceID() <= texture.GetInstanceID()))
+                {
+                    break;
+                }
+
+                uniqueCookieTextures[insertionIndex] = previous;
+                --insertionIndex;
+            }
+            uniqueCookieTextures[insertionIndex] = texture;
+        }
+
+        return uniqueCount;
+    }
+
+    bool TryAllocateCookies(int sizeDivisor, bool reuseCachedAllocations)
+    {
+        bool allocatedAll = true;
+        for (int cookieIndex = 0; cookieIndex < activeUniqueCookieCount; ++cookieIndex)
+        {
+            Texture2D cookieTexture = uniqueCookieTextures[cookieIndex];
+            Vector2Int allocationSize = GetCookieAllocationSize(cookieTexture, sizeDivisor);
+            uniqueCookieAtlasSizes[cookieIndex] = allocationSize;
+
+            Vector4 atlasRect = Vector4.zero;
+            bool allocated = reuseCachedAllocations && cookieAtlas.IsCached(out atlasRect, cookieTexture);
+            if (!allocated)
+            {
+                allocated = cookieAtlas.AllocateTextureWithoutBlit(
+                    cookieTexture,
+                    allocationSize.x,
+                    allocationSize.y,
+                    ref atlasRect);
+            }
+
+            uniqueCookieAtlasRects[cookieIndex] = allocated ? atlasRect : Vector4.zero;
+            allocatedAll &= allocated;
+        }
+
+        return allocatedAll;
+    }
+
+    long GetCookieRequestPixelCount()
+    {
+        long pixelCount = 0;
+        for (int cookieIndex = 0; cookieIndex < activeUniqueCookieCount; ++cookieIndex)
+        {
+            Texture2D cookieTexture = uniqueCookieTextures[cookieIndex];
+            Vector2Int allocationSize = GetCookieAllocationSize(cookieTexture, 1);
+            pixelCount += (long)allocationSize.x * allocationSize.y;
+        }
+
+        return pixelCount;
+    }
+
+    void RepackActiveCookies()
+    {
+        bool packedAll = false;
+        for (int divisor = 1; divisor <= MaxCookieSizeDivisor; ++divisor)
+        {
+            cookieAtlas.ResetAllocator();
+            cookieAtlasNeedsClear = true;
+            if (!TryAllocateCookies(divisor, false))
+                continue;
+
+            cookieSizeDivisor = divisor;
+            packedAll = true;
+            break;
+        }
+
+        if (packedAll)
+            return;
+
+        // Retain as many deterministic, largest-first allocations as possible at the minimum size.
+        cookieAtlas.ResetAllocator();
+        cookieAtlasNeedsClear = true;
+        cookieSizeDivisor = MaxCookieSizeDivisor;
+        TryAllocateCookies(cookieSizeDivisor, false);
+    }
+
+    void EnsureCookieAtlas(int requestedResolution)
+    {
+        int normalizedResolution = Mathf.NextPowerOfTwo(Mathf.Clamp(
+            requestedResolution,
+            MinCookieAtlasResolution,
+            MaxCookieAtlasResolution));
+        if (cookieAtlas != null && cookieAtlasResolution == normalizedResolution)
+            return;
+
+        cookieAtlas?.Release();
+        cookieAtlasResolution = normalizedResolution;
+        cookieSizeDivisor = 1;
+        previousCookieRequestPixelCount = long.MaxValue;
+        cookieAtlas = new Texture2DAtlas(
+            cookieAtlasResolution,
+            cookieAtlasResolution,
+            GraphicsFormat.R8G8B8A8_SRGB,
+            FilterMode.Bilinear,
+            false,
+            "VolumetricLighting.CookieAtlas",
+            false);
+    }
+
+    void EnsureCookieDataCpuCapacity(int count)
+    {
+        if (cookieDataCpuData.Length >= count)
+            return;
+
+        cookieDataCpuData = new VolumetricCookieGpuData[Mathf.NextPowerOfTwo(Mathf.Max(1, count))];
+    }
+
+    void EnsureUniqueCookieCapacity(int count)
+    {
+        if (uniqueCookieTextures.Length >= count)
+            return;
+
+        int newSize = Mathf.NextPowerOfTwo(Mathf.Max(1, count));
+        uniqueCookieTextures = new Texture2D[newSize];
+        uniqueCookieAtlasRects = new Vector4[newSize];
+        uniqueCookieAtlasSizes = new Vector2Int[newSize];
+    }
+
+    int FindUniqueCookieIndex(Texture2D cookieTexture)
+    {
+        for (int cookieIndex = 0; cookieIndex < activeUniqueCookieCount; ++cookieIndex)
+        {
+            if (uniqueCookieTextures[cookieIndex] == cookieTexture)
+                return cookieIndex;
+        }
+
+        return -1;
+    }
+
+    Vector2Int GetCookieAllocationSize(Texture2D cookieTexture, int sizeDivisor)
+    {
+        float sourceWidth = Mathf.Max(1f, cookieTexture.width);
+        float sourceHeight = Mathf.Max(1f, cookieTexture.height);
+        float fitScale = Mathf.Min(1f, cookieAtlasResolution / Mathf.Max(sourceWidth, sourceHeight));
+        float allocationScale = fitScale / Mathf.Max(1, sizeDivisor);
+        return new Vector2Int(
+            Mathf.Clamp(Mathf.RoundToInt(sourceWidth * allocationScale), 4, cookieAtlasResolution),
+            Mathf.Clamp(Mathf.RoundToInt(sourceHeight * allocationScale), 4, cookieAtlasResolution));
+    }
+
+    static Vector4 ShrinkCookieAtlasRect(Vector4 atlasRect, Vector2Int allocationSize)
+    {
+        float offsetX = 0.5f / Mathf.Max(1, allocationSize.x);
+        float offsetY = 0.5f / Mathf.Max(1, allocationSize.y);
+        atlasRect.z += atlasRect.x * offsetX;
+        atlasRect.w += atlasRect.y * offsetY;
+        atlasRect.x *= Mathf.Max(0f, 1f - 2f * offsetX);
+        atlasRect.y *= Mathf.Max(0f, 1f - 2f * offsetY);
+        return atlasRect;
+    }
+
+    static Matrix4x4 CreateSpotCookieMatrix(in VisibleLight visibleLight)
+    {
+        Matrix4x4 projection = Matrix4x4.Perspective(
+            visibleLight.spotAngle,
+            1f,
+            0.001f,
+            Mathf.Max(0.002f, visibleLight.range));
+        projection.SetColumn(2, projection.GetColumn(2) * -1f);
+        return projection * visibleLight.localToWorldMatrix.inverse;
     }
 
     static bool ShouldProcessLight(Light light)
@@ -518,7 +917,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             color = lightColor,
             attenuation = lightAttenuation,
             spotDirection = lightSpotDirection,
-            extraData = new Vector4(shadowLightIndex, isSpotLight, 0.0f, 0.0f)
+            extraData = new Vector4(shadowLightIndex, isSpotLight, -1.0f, 0.0f)
         };
     }
 
@@ -555,8 +954,10 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         internal ComputeShader computeShader;
         internal BufferHandle additionalLightsBuffer;
+        internal BufferHandle cookieDataBuffer;
         internal TextureHandle cameraDepthTexture;
         internal TextureHandle froxelTexture;
+        internal TextureHandle cookieAtlasTexture;
         internal Matrix4x4 inverseProjection;
         internal Matrix4x4 cameraToWorld;
         internal Vector3 mainLightDirection;
@@ -571,10 +972,21 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal int dispatchGroupsY;
         internal int dispatchGroupsZ;
         internal int additionalLightCount;
+        internal int cookieDataCount;
         internal bool enableDirectLighting;
         internal bool enableAdditionalLights;
         internal float nearDepth;
         internal float maxDistance;
+    }
+
+    sealed class CookieAtlasPassData
+    {
+        internal Texture2DAtlas atlas;
+        internal TextureHandle atlasTexture;
+        internal Texture2D[] cookieTextures;
+        internal Vector4[] atlasRects;
+        internal int cookieCount;
+        internal bool clearAtlas;
     }
 
     sealed class RasterPassData
