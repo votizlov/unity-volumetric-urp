@@ -269,9 +269,12 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
                    profilingSampler))
         {
             passData.material = compositeMaterial;
-            passData.sourceTexture = useIntermediateLightingTexture
-                ? resourceData.activeColorTexture
-                : renderGraph.defaultResources.blackTexture;
+            // These passes use depth and froxels, not camera color. The active color
+            // target may be a backbuffer with no Texture that Blitter can bind.
+            passData.sourceTexture = renderGraph.defaultResources.blackTexture;
+            passData.destinationTexture = useIntermediateLightingTexture
+                ? lightingTexture
+                : resourceData.activeColorTexture;
             passData.cameraDepthTexture = resourceData.cameraDepthTexture;
             passData.froxelTexture = froxelTexture;
             passData.gridX = gridX;
@@ -299,7 +302,9 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             }
             else
             {
-                builder.SetRenderAttachment(resourceData.activeColorTexture, 0, AccessFlags.WriteAll);
+                // Accumulation replaces the image; composite and overlay blend with it.
+                builder.SetRenderAttachment(resourceData.activeColorTexture, 0,
+                    outputAccumulation ? AccessFlags.WriteAll : AccessFlags.ReadWrite);
             }
 
             builder.AllowPassCulling(false);
@@ -345,6 +350,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
                     {
                         passData.material = blurMaterials[blurPassIndex];
                         passData.sourceTexture = blurSource;
+                        passData.destinationTexture = blurDestination;
                         passData.lightingTexture = blurSource;
                         passData.screenWidth = cameraData.cameraTargetDescriptor.width;
                         passData.screenHeight = cameraData.cameraTargetDescriptor.height;
@@ -374,6 +380,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             {
                 passData.material = blurMaterials[blurPassCount - 1];
                 passData.sourceTexture = blurSource;
+                passData.destinationTexture = resourceData.activeColorTexture;
                 passData.lightingTexture = blurSource;
                 passData.screenWidth = cameraData.cameraTargetDescriptor.width;
                 passData.screenHeight = cameraData.cameraTargetDescriptor.height;
@@ -381,7 +388,9 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
                 passData.kawaseIteration = baseKawaseIteration + (blurPassCount - 1);
 
                 builder.UseTexture(passData.sourceTexture, AccessFlags.Read);
-                builder.SetRenderAttachment(resourceData.activeColorTexture, 0, AccessFlags.WriteAll);
+                // The normal composite uses additive blending; debug views overwrite.
+                builder.SetRenderAttachment(resourceData.activeColorTexture, 0,
+                    finalPassIndex == 3 ? AccessFlags.ReadWrite : AccessFlags.WriteAll);
                 builder.AllowPassCulling(false);
                 builder.AllowGlobalStateModification(true);
                 passData.passIndex = finalPassIndex;
@@ -947,7 +956,17 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         int passIndex = data.passIndex >= 0
             ? data.passIndex
             : (data.debugMode == (int)VolumetricLightingRendererFeature.DebugMode.FroxelOverlay ? 1 : 0);
-        Blitter.BlitTexture(context.cmd, data.sourceTexture, Vector2.one, data.material, passIndex);
+        // The dummy blit source has no meaningful orientation. Accumulation reads
+        // camera depth; blur/composite reads the lighting texture instead.
+        TextureHandle uvSource = data.lightingTexture.IsValid()
+            ? data.lightingTexture
+            : data.cameraDepthTexture;
+        bool flipY = context.GetTextureUVOrigin(uvSource)
+            != context.GetTextureUVOrigin(data.destinationTexture);
+        Vector4 scaleBias = flipY
+            ? new Vector4(1f, -1f, 0f, 1f)
+            : new Vector4(1f, 1f, 0f, 0f);
+        Blitter.BlitTexture(context.cmd, data.sourceTexture, scaleBias, data.material, passIndex);
     }
 
     sealed class ComputePassData
@@ -993,6 +1012,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         internal Material material;
         internal TextureHandle sourceTexture;
+        internal TextureHandle destinationTexture;
         internal TextureHandle cameraDepthTexture;
         internal TextureHandle froxelTexture;
         internal TextureHandle lightingTexture;

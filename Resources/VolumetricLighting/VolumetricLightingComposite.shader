@@ -4,6 +4,11 @@ Shader "Hidden/VolumetricLighting/Composite"
     {
         Tags { "RenderType"="Transparent" "Queue"="Transparent" }
 
+        HLSLINCLUDE
+        // Supplied by Blitter from the RenderGraph source/destination UV origins.
+        float4 _BlitScaleBias;
+        ENDHLSL
+
         Pass
         {
             Name "Composite"
@@ -52,7 +57,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
@@ -181,7 +187,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
@@ -252,7 +259,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
@@ -352,7 +360,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
@@ -426,7 +435,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
@@ -474,7 +484,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
@@ -545,7 +556,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
@@ -592,7 +604,8 @@ Shader "Hidden/VolumetricLighting/Composite"
             {
                 Varyings output;
                 output.positionCS = VolumetricLighting_GetFullscreenTrianglePositionCS(input.vertexID);
-                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID);
+                output.uv = VolumetricLighting_GetFullscreenTriangleUV(input.vertexID)
+                    * _BlitScaleBias.xy + _BlitScaleBias.zw;
                 return output;
             }
 
