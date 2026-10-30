@@ -26,6 +26,11 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         [Min(1)] public int stepCount = 48;
         [Range(0f, 1f)] public float jitterStrength = 0.25f;
         [Min(0f)] public float compositeDepthBias = 0.01f;
+        [Header("Uniform Fog")]
+        [Tooltip("Replace shadowed light scattering with uniform distance fog. Does not sample shadow maps.")]
+        public bool enableUniformFog = false;
+        [Tooltip("Uniform additive fog density per world unit, independent of scattering strength.")]
+        [Min(0f)] public float uniformFogDensity = 0.005f;
         public bool enableDirectLighting = true;
         public bool enableAdditionalLights = false;
         [Header("Volumetric Cookies")]
@@ -40,6 +45,29 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         public DebugMode debugMode = DebugMode.Off;
         [Range(0f, 1f)] public float debugOpacity = 0.65f;
         public RenderPassEvent renderPassEvent = RenderPassEvent.BeforeRenderingTransparents;
+    }
+
+    // Camera-local overrides leave renderer assets untouched and preserve their defaults.
+    static readonly System.Collections.Generic.Dictionary<Camera, float> uniformFogOverrides = new();
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void ResetUniformFogOverrides() => uniformFogOverrides.Clear();
+
+    public static void SetUniformFogOverride(Camera camera, float density)
+    {
+        if (camera != null) uniformFogOverrides[camera] = Mathf.Max(0f, density);
+    }
+
+    public static void ClearUniformFogOverride(Camera camera)
+    {
+        if (!ReferenceEquals(camera, null)) uniformFogOverrides.Remove(camera);
+    }
+
+    internal static bool GetUniformFog(Camera camera, Settings settings, out float density)
+    {
+        if (uniformFogOverrides.TryGetValue(camera, out density)) return true;
+        density = Mathf.Max(0f, settings.uniformFogDensity);
+        return settings.enableUniformFog;
     }
 
     public const int MaxKawaseBlurPasses = 8;

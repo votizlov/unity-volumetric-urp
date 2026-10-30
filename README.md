@@ -16,6 +16,20 @@ Designed to add visible light beams, atmospheric depth, and shadowed volumetric 
 - Independent toggles for direct lighting and additional lights
 - Debug views and optional Kawase blur
 
+## Uniform distance fog
+
+Enable `enableUniformFog` on the renderer feature to replace light scattering with
+uniform additive white fog. It is disabled by default. `uniformFogDensity` controls
+brightness per world unit independently of `scatteringStrength`; `maxDistance` caps
+the fog distance. The `_VL_UNIFORM_FOG` shader variant integrates distance analytically
+and skips froxel updates, light cookies and all shadow-map sampling. It works without
+any enabled lights and with the existing accumulation/debug and blur paths.
+
+For local environment transitions, call
+`VolumetricLightingRendererFeature.SetUniformFogOverride(camera, density)` and
+`ClearUniformFogOverride(camera)` when leaving or disabling the environment controller.
+Overrides affect only that camera and never modify the renderer asset.
+
 ## Setup
 
 1. Add `VolumetricLightingRendererFeature` to your URP renderer.

@@ -19,6 +19,7 @@ Shader "Hidden/VolumetricLighting/Composite"
 
             HLSLPROGRAM
             #pragma vertex Vert
+            #pragma multi_compile_local_fragment _ _VL_UNIFORM_FOG
             #pragma fragment FragComposite
             #pragma target 4.5
 
@@ -34,6 +35,7 @@ Shader "Hidden/VolumetricLighting/Composite"
             float4 _VolumetricLightingVolumeParams;
             float4x4 _VolumetricLightingInverseProjectionMatrix;
             float4 _VolumetricLightingMainLightColor;
+            float _VolumetricLightingUniformFogDensity;
             float _VolumetricLightingScatteringStrength;
             float _VolumetricLightingJitterStrength;
             float _VolumetricLightingCompositeDepthBias;
@@ -100,8 +102,16 @@ Shader "Hidden/VolumetricLighting/Composite"
             float3 VolumetricLighting_Accumulate(float2 uv, float sceneDepth)
             {
                 float maxDistance = _VolumetricLightingVolumeParams.y;
+#if defined(_VL_UNIFORM_FOG)
+                // Analytic integration of constant density; no froxel, light or shadow samples.
+                float rayScale = unity_OrthoParams.w > 0.5 ? 1.0 :
+                    length(VolumetricLighting_GetViewRay(uv, _VolumetricLightingInverseProjectionMatrix));
+                float distanceFromCamera = min(max(sceneDepth - _VolumetricLightingCompositeDepthBias, 0.0) * rayScale, maxDistance);
+                return (distanceFromCamera * _VolumetricLightingUniformFogDensity).xxx;
+#else
                 float3 lighting = VolumetricLighting_AccumulateLighting(uv, sceneDepth);
                 return lighting * (_VolumetricLightingScatteringStrength / max(maxDistance, 0.001));
+#endif
             }
 
             half3 KawaseBlurFilter(half2 texCoord, half2 pixelSize, half iteration)
@@ -221,6 +231,7 @@ Shader "Hidden/VolumetricLighting/Composite"
 
             HLSLPROGRAM
             #pragma vertex Vert
+            #pragma multi_compile_local_fragment _ _VL_UNIFORM_FOG
             #pragma fragment FragAccumulateScalar
             #pragma target 4.5
 
@@ -236,6 +247,7 @@ Shader "Hidden/VolumetricLighting/Composite"
             float4 _VolumetricLightingVolumeParams;
             float4x4 _VolumetricLightingInverseProjectionMatrix;
             float4 _VolumetricLightingMainLightColor;
+            float _VolumetricLightingUniformFogDensity;
             float _VolumetricLightingScatteringStrength;
             float _VolumetricLightingJitterStrength;
             float _VolumetricLightingCompositeDepthBias;
@@ -301,8 +313,16 @@ Shader "Hidden/VolumetricLighting/Composite"
             float3 VolumetricLighting_Accumulate(float2 uv, float sceneDepth)
             {
                 float maxDistance = _VolumetricLightingVolumeParams.y;
+#if defined(_VL_UNIFORM_FOG)
+                // Analytic integration of constant density; no froxel, light or shadow samples.
+                float rayScale = unity_OrthoParams.w > 0.5 ? 1.0 :
+                    length(VolumetricLighting_GetViewRay(uv, _VolumetricLightingInverseProjectionMatrix));
+                float distanceFromCamera = min(max(sceneDepth - _VolumetricLightingCompositeDepthBias, 0.0) * rayScale, maxDistance);
+                return (distanceFromCamera * _VolumetricLightingUniformFogDensity).xxx;
+#else
                 float3 lighting = VolumetricLighting_AccumulateLighting(uv, sceneDepth);
                 return lighting * (_VolumetricLightingScatteringStrength / max(maxDistance, 0.001));
+#endif
             }
 
             half4 FragAccumulateScalar(Varyings input) : SV_Target
@@ -337,6 +357,7 @@ Shader "Hidden/VolumetricLighting/Composite"
             float4 _VolumetricLightingVolumeParams;
             float4x4 _VolumetricLightingInverseProjectionMatrix;
             float4 _VolumetricLightingMainLightColor;
+            float _VolumetricLightingUniformFogDensity;
             float _VolumetricLightingScatteringStrength;
             float _VolumetricLightingJitterStrength;
             float _VolumetricLightingCompositeDepthBias;

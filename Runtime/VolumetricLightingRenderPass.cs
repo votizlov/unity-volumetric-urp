@@ -129,9 +129,10 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             && lightData.visibleLights[lightData.mainLightIndex].lightType == LightType.Directional
             && ShouldProcessLight(lightData.visibleLights[lightData.mainLightIndex].light);
 
-        bool enableDirectLighting = settings.enableDirectLighting && hasMainDirectionalLight;
-        bool requestAdditionalLights = settings.enableAdditionalLights;
-        if (!enableDirectLighting && !requestAdditionalLights)
+        bool uniformFog = VolumetricLightingRendererFeature.GetUniformFog(camera, settings, out float uniformFogDensity);
+        bool enableDirectLighting = !uniformFog && settings.enableDirectLighting && hasMainDirectionalLight;
+        bool requestAdditionalLights = !uniformFog && settings.enableAdditionalLights;
+        if (!uniformFog && !enableDirectLighting && !requestAdditionalLights)
             return;
 
         int gridX = Mathf.Max(1, settings.gridX);
@@ -162,7 +163,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             autoGenerateMips = false
         };
 
-        TextureHandle froxelTexture = UniversalRenderer.CreateRenderGraphTexture(
+        TextureHandle froxelTexture = uniformFog ? TextureHandle.nullHandle : UniversalRenderer.CreateRenderGraphTexture(
             renderGraph,
             froxelDescriptor,
             "VolumetricLighting.FroxelTexture",
@@ -184,7 +185,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             : 0;
         bool enableAdditionalLights = requestAdditionalLights && additionalLightCount > 0;
 
-        if (!enableDirectLighting && !enableAdditionalLights)
+        if (!uniformFog && !enableDirectLighting && !enableAdditionalLights)
             return;
 
         TextureHandle cookieAtlasTexture = default;
@@ -194,6 +195,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             RecordCookieAtlasUpdatePass(renderGraph, cookieAtlasTexture);
         }
 
+        if (!uniformFog)
         using (IComputeRenderGraphBuilder builder = renderGraph.AddComputePass<ComputePassData>(
                    "Volumetric Lighting Froxel Update",
                    out ComputePassData passData,
@@ -284,6 +286,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             passData.screenHeight = cameraData.cameraTargetDescriptor.height;
             passData.nearDepth = nearDepth;
             passData.maxDistance = maxDistance;
+            passData.uniformFog = uniformFog;
+            passData.uniformFogDensity = uniformFogDensity;
             passData.scatteringStrength = Mathf.Max(0f, settings.scatteringStrength);
             passData.stepCount = stepCount;
             passData.jitterStrength = Mathf.Clamp01(settings.jitterStrength);
@@ -295,7 +299,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
             builder.UseTexture(passData.sourceTexture, AccessFlags.Read);
             builder.UseTexture(passData.cameraDepthTexture, AccessFlags.Read);
-            builder.UseTexture(passData.froxelTexture, AccessFlags.Read);
+            if (passData.froxelTexture.IsValid())
+                builder.UseTexture(passData.froxelTexture, AccessFlags.Read);
             if (useIntermediateLightingTexture)
             {
                 builder.SetRenderAttachment(lightingTexture, 0, AccessFlags.WriteAll);
@@ -946,6 +951,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         data.material.SetVector(VolumetricLightingShaderIDs.VolumeParams, new Vector4(data.nearDepth, data.maxDistance, 0f, 0f));
         data.material.SetMatrix(VolumetricLightingShaderIDs.InverseProjectionMatrix, data.inverseProjection);
         data.material.SetColor(VolumetricLightingShaderIDs.MainLightColor, data.mainLightColor);
+        CoreUtils.SetKeyword(data.material, "_VL_UNIFORM_FOG", data.uniformFog);
+        data.material.SetFloat("_VolumetricLightingUniformFogDensity", data.uniformFogDensity);
         data.material.SetFloat(VolumetricLightingShaderIDs.ScatteringStrength, data.scatteringStrength);
         data.material.SetFloat(VolumetricLightingShaderIDs.JitterStrength, data.jitterStrength);
         data.material.SetFloat(VolumetricLightingShaderIDs.CompositeDepthBias, data.compositeDepthBias);
@@ -1028,6 +1035,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal int passIndex;
         internal float nearDepth;
         internal float maxDistance;
+        internal bool uniformFog;
+        internal float uniformFogDensity;
         internal float scatteringStrength;
         internal float jitterStrength;
         internal float compositeDepthBias;
