@@ -1,4 +1,6 @@
 #pragma kernel CSMain
+#pragma kernel CSTemporal
+#pragma kernel CSIntegrate
 #pragma target 4.5
 #pragma multi_compile _ _MAIN_LIGHT_SHADOWS
 #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
@@ -20,19 +22,30 @@ struct VolumetricLightingAdditionalLight
     float4 extraData;
 };
 
-TEXTURE2D_X(_CameraDepthTexture);
 RW_TEXTURE3D(float4, _VolumetricLightingFroxelTexture);
+TEXTURE3D(_VolumetricLightingFroxelSource);
+TEXTURE3D(_VolumetricLightingHistoryTexture);
+RW_TEXTURE3D(float4, _VolumetricLightingTemporalTexture);
+RW_TEXTURE3D(float4, _VolumetricLightingIntegratedTexture);
 StructuredBuffer<VolumetricLightingAdditionalLight> _VolumetricLightingAdditionalLights;
 
 float4 _VolumetricLightingGridParams;
-float4 _VolumetricLightingScreenSize;
 float4 _VolumetricLightingVolumeParams;
 float4x4 _VolumetricLightingInverseProjectionMatrix;
 float4x4 _VolumetricLightingCameraToWorldMatrix;
 float4 _VolumetricLightingMainLightDirection;
 float4 _VolumetricLightingMainLightColor;
 int _VolumetricLightingAdditionalLightCount;
+// xyz: per-frame sample offset inside the froxel, in froxel units (x, y) and slices (z).
+float4 _VolumetricLightingFroxelJitter;
+float4x4 _VolumetricLightingPrevWorldToViewMatrix;
+float4x4 _VolumetricLightingPrevProjectionMatrix;
+// x: weight of the current frame, y: 1 when the history holds a previous frame of this camera.
+float4 _VolumetricLightingTemporalParams;
 
+// Froxels hold world-space in-scattering only. Camera occlusion is resolved per pixel by the
+// composite, which ends each ray at the full-resolution scene depth; masking froxels here by a
+// single depth sample per column turned thin occluders into froxel-sized dark cells.
 [numthreads(4, 4, 4)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -43,22 +56,14 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float nearDepth = _VolumetricLightingVolumeParams.x;
     float maxDistance = _VolumetricLightingVolumeParams.y;
 
-    float2 uv = (float2(dispatchThreadID.xy) + 0.5) / max(_VolumetricLightingGridParams.xy, 1.0);
+    float2 uv = (float2(dispatchThreadID.xy) + 0.5 + _VolumetricLightingFroxelJitter.xy) / max(_VolumetricLightingGridParams.xy, 1.0);
     uv.y = 1.0 - uv.y;
-    float linearDepth = VolumetricLighting_SliceIndexToLinearDepth(dispatchThreadID.z, _VolumetricLightingGridParams.z, nearDepth, maxDistance);
-    int2 pixelCoord = min(int2(uv * _VolumetricLightingScreenSize.xy), int2(_VolumetricLightingScreenSize.xy) - 1);
-
-    float rawDepth = LOAD_TEXTURE2D_X(_CameraDepthTexture, pixelCoord).x;
-    float sceneDepth = LinearEyeDepth(rawDepth, _ZBufferParams);
-    if (!isfinite(sceneDepth) || sceneDepth <= 0.0)
-        sceneDepth = maxDistance;
-    sceneDepth = min(sceneDepth, maxDistance);
+    float linearDepth = VolumetricLighting_SliceIndexToLinearDepth(dispatchThreadID.z + _VolumetricLightingFroxelJitter.z, _VolumetricLightingGridParams.z, nearDepth, maxDistance);
 
     float3 viewRay = VolumetricLighting_GetViewRay(uv, _VolumetricLightingInverseProjectionMatrix);
     float3 viewPosition = viewRay * linearDepth;
     float3 worldPosition = mul(_VolumetricLightingCameraToWorldMatrix, float4(viewPosition, 1.0)).xyz;
 
-    float visibility = linearDepth <= (sceneDepth + 0.5) ? 1.0 : 0.0;
     half3 lighting = half3(0.0, 0.0, 0.0);
 
 #if defined(_VL_DIRECT_LIGHTING)
@@ -95,5 +100,97 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
 #endif
 
-    _VolumetricLightingFroxelTexture[dispatchThreadID] = float4(lighting * visibility, visibility);
+    _VolumetricLightingFroxelTexture[dispatchThreadID] = float4(lighting, 1.0);
+}
+
+// Froxels are camera-attached and sample the shadow map once, so shaft edges jump between froxels
+// as the camera moves. Each frame samples a different jittered point inside the froxel; this pass
+// reprojects the previous frame's volume through last frame's camera and blends, clamping history
+// to the current 6-neighbourhood so moving shadows do not trail.
+[numthreads(4, 4, 4)]
+void CSTemporal(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    int3 grid = int3(_VolumetricLightingGridParams.xyz);
+    if (any(dispatchThreadID >= grid))
+        return;
+
+    int3 froxelCoord = int3(dispatchThreadID);
+    float3 current = LOAD_TEXTURE3D(_VolumetricLightingFroxelSource, froxelCoord).rgb;
+    if (_VolumetricLightingTemporalParams.y < 0.5)
+    {
+        _VolumetricLightingTemporalTexture[froxelCoord] = float4(current, 1.0);
+        return;
+    }
+
+    float nearDepth = _VolumetricLightingVolumeParams.x;
+    float maxDistance = _VolumetricLightingVolumeParams.y;
+
+    float2 uv = (float2(froxelCoord.xy) + 0.5) / max(_VolumetricLightingGridParams.xy, 1.0);
+    uv.y = 1.0 - uv.y;
+    float linearDepth = VolumetricLighting_SliceIndexToLinearDepth(froxelCoord.z, _VolumetricLightingGridParams.z, nearDepth, maxDistance);
+    float3 viewPosition = VolumetricLighting_GetViewRay(uv, _VolumetricLightingInverseProjectionMatrix) * linearDepth;
+    float3 worldPosition = mul(_VolumetricLightingCameraToWorldMatrix, float4(viewPosition, 1.0)).xyz;
+
+    float3 prevViewPosition = mul(_VolumetricLightingPrevWorldToViewMatrix, float4(worldPosition, 1.0)).xyz;
+    float prevLinearDepth = -prevViewPosition.z;
+    float4 prevClip = mul(_VolumetricLightingPrevProjectionMatrix, float4(prevViewPosition, 1.0));
+    float2 prevUv = prevClip.xy / max(prevClip.w, VOLUMETRIC_LIGHTING_EPSILON) * 0.5 + 0.5;
+
+    bool historyInside = prevClip.w > VOLUMETRIC_LIGHTING_EPSILON
+        && all(prevUv >= 0.0) && all(prevUv <= 1.0)
+        && prevLinearDepth >= nearDepth && prevLinearDepth <= maxDistance;
+    if (!historyInside)
+    {
+        _VolumetricLightingTemporalTexture[froxelCoord] = float4(current, 1.0);
+        return;
+    }
+
+    int3 maxCoord = grid - 1;
+    float3 neighbourMin = current;
+    float3 neighbourMax = current;
+    static const int3 neighbourOffsets[6] =
+    {
+        int3(1, 0, 0), int3(-1, 0, 0), int3(0, 1, 0), int3(0, -1, 0), int3(0, 0, 1), int3(0, 0, -1)
+    };
+    [unroll]
+    for (int neighbourIndex = 0; neighbourIndex < 6; ++neighbourIndex)
+    {
+        int3 neighbourCoord = clamp(froxelCoord + neighbourOffsets[neighbourIndex], 0, maxCoord);
+        float3 neighbour = LOAD_TEXTURE3D(_VolumetricLightingFroxelSource, neighbourCoord).rgb;
+        neighbourMin = min(neighbourMin, neighbour);
+        neighbourMax = max(neighbourMax, neighbour);
+    }
+
+    float3 historyCoord = float3(prevUv.x, 1.0 - prevUv.y, VolumetricLighting_LinearDepthToSlice01(prevLinearDepth, nearDepth, maxDistance));
+    float3 history = SAMPLE_TEXTURE3D_LOD(_VolumetricLightingHistoryTexture, sampler_LinearClamp, historyCoord, 0).rgb;
+    history = clamp(history, neighbourMin, neighbourMax);
+
+    _VolumetricLightingTemporalTexture[froxelCoord] = float4(lerp(history, current, _VolumetricLightingTemporalParams.x), 1.0);
+}
+
+// Front-to-back prefix sum per froxel column: texel z holds the in-scattering integrated from the
+// near plane to the far edge of slice z, so the composite needs one lookup instead of a ray march.
+[numthreads(8, 8, 1)]
+void CSIntegrate(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    int3 grid = int3(_VolumetricLightingGridParams.xyz);
+    if (any(int2(dispatchThreadID.xy) >= grid.xy))
+        return;
+
+    float nearDepth = _VolumetricLightingVolumeParams.x;
+    float maxDistance = _VolumetricLightingVolumeParams.y;
+    float sliceCount = _VolumetricLightingGridParams.z;
+
+    float3 accumulated = 0.0.xxx;
+    float sliceStart = nearDepth;
+
+    [loop]
+    for (int sliceIndex = 0; sliceIndex < grid.z; ++sliceIndex)
+    {
+        int3 froxelCoord = int3(dispatchThreadID.xy, sliceIndex);
+        float sliceEnd = VolumetricLighting_SliceEdgeToLinearDepth(sliceIndex + 1, sliceCount, nearDepth, maxDistance);
+        accumulated += LOAD_TEXTURE3D(_VolumetricLightingFroxelSource, froxelCoord).rgb * (sliceEnd - sliceStart);
+        _VolumetricLightingIntegratedTexture[froxelCoord] = float4(accumulated, 1.0);
+        sliceStart = sliceEnd;
+    }
 }

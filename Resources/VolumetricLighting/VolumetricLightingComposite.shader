@@ -20,7 +20,7 @@ Shader "Hidden/VolumetricLighting/Composite"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
             #include "Assets/Packages/VolumetricLighting/Resources/VolumetricLighting/VolumetricLightingCommon.hlsl"
-            TEXTURE3D(_VolumetricLightingFroxelTexture);
+            TEXTURE3D(_VolumetricLightingIntegratedTexture);
             TEXTURE2D_X(_VolumetricLightingTexture);
 
             CBUFFER_START(UnityPerMaterial)
@@ -30,11 +30,9 @@ Shader "Hidden/VolumetricLighting/Composite"
             float4x4 _VolumetricLightingInverseProjectionMatrix;
             float4 _VolumetricLightingMainLightColor;
             float _VolumetricLightingScatteringStrength;
-            float _VolumetricLightingJitterStrength;
             float _VolumetricLightingCompositeDepthBias;
             float _VolumetricLightingDebugOpacity;
             float _VolumetricLightingKawaseIteration;
-            int _VolumetricLightingStepCount;
             CBUFFER_END
 
             struct Attributes
@@ -73,22 +71,9 @@ Shader "Hidden/VolumetricLighting/Composite"
                 if (rayEnd <= nearDepth)
                     return 0.0.xxx;
 
-                int stepCount = max(_VolumetricLightingStepCount, 1);
-                float stepLength = (rayEnd - nearDepth) / stepCount;
-                float jitter = (VolumetricLighting_InterleavedGradientNoise(uv * _VolumetricLightingScreenSize.xy) - 0.5) * _VolumetricLightingJitterStrength;
-                float3 accumulated = 0.0.xxx;
-
-                [loop]
-                for (int stepIndex = 0; stepIndex < stepCount; ++stepIndex)
-                {
-                    float sampleDepth = nearDepth + (stepIndex + 0.5 + jitter) * stepLength;
-                    float slice01 = VolumetricLighting_LinearDepthToSlice01(sampleDepth, nearDepth, maxDistance);
-                    float3 sampleCoord = float3(uv, slice01);
-                    float3 lighting = SAMPLE_TEXTURE3D_LOD(_VolumetricLightingFroxelTexture, sampler_LinearClamp, sampleCoord, 0).rgb;
-                    accumulated += lighting * stepLength;
-                }
-
-                return accumulated;
+                return VolumetricLighting_SampleIntegrated(
+                    TEXTURE3D_ARGS(_VolumetricLightingIntegratedTexture, sampler_LinearClamp),
+                    uv, rayEnd, _VolumetricLightingGridParams.z, nearDepth, maxDistance);
             }
 
             float3 VolumetricLighting_Accumulate(float2 uv, float sceneDepth)
@@ -220,7 +205,7 @@ Shader "Hidden/VolumetricLighting/Composite"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
             #include "Assets/Packages/VolumetricLighting/Resources/VolumetricLighting/VolumetricLightingCommon.hlsl"
-            TEXTURE3D(_VolumetricLightingFroxelTexture);
+            TEXTURE3D(_VolumetricLightingIntegratedTexture);
             TEXTURE2D_X(_VolumetricLightingTexture);
 
             CBUFFER_START(UnityPerMaterial)
@@ -230,11 +215,9 @@ Shader "Hidden/VolumetricLighting/Composite"
             float4x4 _VolumetricLightingInverseProjectionMatrix;
             float4 _VolumetricLightingMainLightColor;
             float _VolumetricLightingScatteringStrength;
-            float _VolumetricLightingJitterStrength;
             float _VolumetricLightingCompositeDepthBias;
             float _VolumetricLightingDebugOpacity;
             float _VolumetricLightingKawaseIteration;
-            int _VolumetricLightingStepCount;
             CBUFFER_END
 
             struct Attributes
@@ -273,21 +256,9 @@ Shader "Hidden/VolumetricLighting/Composite"
                 if (rayEnd <= nearDepth)
                     return 0.0.xxx;
 
-                int stepCount = max(_VolumetricLightingStepCount, 1);
-                float stepLength = (rayEnd - nearDepth) / stepCount;
-                float jitter = (VolumetricLighting_InterleavedGradientNoise(uv * _VolumetricLightingScreenSize.xy) - 0.5) * _VolumetricLightingJitterStrength;
-                float3 accumulated = 0.0.xxx;
-
-                [loop]
-                for (int stepIndex = 0; stepIndex < stepCount; ++stepIndex)
-                {
-                    float sampleDepth = nearDepth + (stepIndex + 0.5 + jitter) * stepLength;
-                    float slice01 = VolumetricLighting_LinearDepthToSlice01(sampleDepth, nearDepth, maxDistance);
-                    float3 sampleCoord = float3(uv, slice01);
-                    accumulated += SAMPLE_TEXTURE3D_LOD(_VolumetricLightingFroxelTexture, sampler_LinearClamp, sampleCoord, 0).rgb * stepLength;
-                }
-
-                return accumulated;
+                return VolumetricLighting_SampleIntegrated(
+                    TEXTURE3D_ARGS(_VolumetricLightingIntegratedTexture, sampler_LinearClamp),
+                    uv, rayEnd, _VolumetricLightingGridParams.z, nearDepth, maxDistance);
             }
 
             float3 VolumetricLighting_Accumulate(float2 uv, float sceneDepth)
@@ -330,11 +301,9 @@ Shader "Hidden/VolumetricLighting/Composite"
             float4x4 _VolumetricLightingInverseProjectionMatrix;
             float4 _VolumetricLightingMainLightColor;
             float _VolumetricLightingScatteringStrength;
-            float _VolumetricLightingJitterStrength;
             float _VolumetricLightingCompositeDepthBias;
             float _VolumetricLightingDebugOpacity;
             float _VolumetricLightingKawaseIteration;
-            int _VolumetricLightingStepCount;
             CBUFFER_END
 
             struct Attributes

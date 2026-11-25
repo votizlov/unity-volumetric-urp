@@ -23,9 +23,11 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         [Min(0f)] public float nearOffset = 0.5f;
         [Min(0.1f)] public float maxDistance = 48f;
         [Min(0f)] public float scatteringStrength = 0.35f;
-        [Min(1)] public int stepCount = 48;
-        [Range(0f, 1f)] public float jitterStrength = 0.25f;
         [Min(0f)] public float compositeDepthBias = 0.01f;
+        [Tooltip("Jitter froxel samples every frame and blend with the reprojected previous frame. Removes shaft flicker caused by the coarse froxel grid sampling the shadow map.")]
+        public bool enableTemporalReprojection = true;
+        [Tooltip("Weight of the current frame. Higher reacts faster to moving shadows, lower is smoother.")]
+        [Range(0.05f, 1f)] public float temporalBlend = 0.25f;
         public bool enableDirectLighting = true;
         public bool enableAdditionalLights = false;
         public bool enableKawaseBlur = false;

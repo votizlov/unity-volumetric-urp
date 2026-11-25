@@ -31,7 +31,7 @@ Lights without `VolumetricLight` are ignored by the volumetric pass.
 
 - `gridX`, `gridY`, `gridZ` for froxel resolution
 - `nearOffset` and `maxDistance` for volume depth range
-- `scatteringStrength`, `stepCount`, and `jitterStrength` for sampling quality
+- `scatteringStrength` for in-scattering intensity (froxels are integrated front to back, so the composite needs no ray-march settings)
 - `compositeDepthBias` for compositing control
 - `enableDirectLighting` to allow or disable main directional light scattering
 - `enableAdditionalLights` to allow or disable point and spot light scattering

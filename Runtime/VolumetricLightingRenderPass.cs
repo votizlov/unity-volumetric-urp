@@ -3,11 +3,37 @@ using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 {
     const string ComputeKernelName = "CSMain";
+    const string TemporalKernelName = "CSTemporal";
+    const string IntegrateKernelName = "CSIntegrate";
+    const int JitterSequenceLength = 16;
+
+    sealed class FroxelHistory
+    {
+        internal readonly RTHandle[] textures = new RTHandle[2];
+        internal int readIndex;
+        internal int frameIndex;
+        internal bool valid;
+        internal Matrix4x4 prevWorldToView;
+        internal Matrix4x4 prevProjection;
+
+        internal void Release()
+        {
+            for (int textureIndex = 0; textureIndex < textures.Length; ++textureIndex)
+            {
+                textures[textureIndex]?.Release();
+                textures[textureIndex] = null;
+            }
+        }
+    }
+
+    readonly Dictionary<Camera, FroxelHistory> histories = new();
+    readonly List<Camera> staleHistoryCameras = new();
 
     [StructLayout(LayoutKind.Sequential)]
     struct AdditionalLightGpuData
@@ -27,9 +53,13 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     GraphicsBuffer additionalLightsBuffer;
     AdditionalLightGpuData[] additionalLightsCpuData = System.Array.Empty<AdditionalLightGpuData>();
     int computeKernelIndex = -1;
+    int temporalKernelIndex = -1;
+    int integrateKernelIndex = -1;
     int threadGroupSizeX = 4;
     int threadGroupSizeY = 4;
     int threadGroupSizeZ = 4;
+    int integrateGroupSizeX = 8;
+    int integrateGroupSizeY = 8;
 
     public VolumetricLightingRenderPass(string profilerTag)
     {
@@ -48,7 +78,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         if (froxelUpdateShader == null)
             return;
 
-        if (cachedShader != froxelUpdateShader || computeKernelIndex < 0)
+        if (cachedShader != froxelUpdateShader || computeKernelIndex < 0 || temporalKernelIndex < 0 || integrateKernelIndex < 0)
         {
             computeKernelIndex = froxelUpdateShader.FindKernel(ComputeKernelName);
             froxelUpdateShader.GetKernelThreadGroupSizes(
@@ -59,6 +89,16 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             threadGroupSizeX = Mathf.Max(1, (int)groupSizeX);
             threadGroupSizeY = Mathf.Max(1, (int)groupSizeY);
             threadGroupSizeZ = Mathf.Max(1, (int)groupSizeZ);
+
+            temporalKernelIndex = froxelUpdateShader.FindKernel(TemporalKernelName);
+            integrateKernelIndex = froxelUpdateShader.FindKernel(IntegrateKernelName);
+            froxelUpdateShader.GetKernelThreadGroupSizes(
+                integrateKernelIndex,
+                out uint integrateSizeX,
+                out uint integrateSizeY,
+                out _);
+            integrateGroupSizeX = Mathf.Max(1, (int)integrateSizeX);
+            integrateGroupSizeY = Mathf.Max(1, (int)integrateSizeY);
             cachedShader = froxelUpdateShader;
         }
     }
@@ -67,6 +107,59 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         additionalLightsBuffer?.Release();
         additionalLightsBuffer = null;
+
+        foreach (FroxelHistory history in histories.Values)
+            history.Release();
+        histories.Clear();
+    }
+
+    FroxelHistory GetHistory(Camera camera, in RenderTextureDescriptor froxelDescriptor)
+    {
+        staleHistoryCameras.Clear();
+        foreach (Camera historyCamera in histories.Keys)
+        {
+            if (historyCamera == null)
+                staleHistoryCameras.Add(historyCamera);
+        }
+        foreach (Camera staleCamera in staleHistoryCameras)
+        {
+            histories[staleCamera].Release();
+            histories.Remove(staleCamera);
+        }
+
+        if (!histories.TryGetValue(camera, out FroxelHistory history))
+        {
+            history = new FroxelHistory();
+            histories.Add(camera, history);
+        }
+
+        for (int textureIndex = 0; textureIndex < history.textures.Length; ++textureIndex)
+        {
+            if (RenderingUtils.ReAllocateHandleIfNeeded(
+                    ref history.textures[textureIndex],
+                    froxelDescriptor,
+                    FilterMode.Bilinear,
+                    TextureWrapMode.Clamp,
+                    name: textureIndex == 0 ? "VolumetricLighting.FroxelHistoryA" : "VolumetricLighting.FroxelHistoryB"))
+            {
+                history.valid = false;
+            }
+        }
+
+        return history;
+    }
+
+    static float Halton(int index, int radix)
+    {
+        float result = 0f;
+        float fraction = 1f / radix;
+        while (index > 0)
+        {
+            result += (index % radix) * fraction;
+            index /= radix;
+            fraction /= radix;
+        }
+        return result;
     }
 
     public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -78,6 +171,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             || blurMaterials[0] == null
             || froxelUpdateShader == null
             || computeKernelIndex < 0
+            || temporalKernelIndex < 0
+            || integrateKernelIndex < 0
             || !SystemInfo.supportsComputeShaders)
         {
             return;
@@ -108,7 +203,6 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         int gridX = Mathf.Max(1, settings.gridX);
         int gridY = Mathf.Max(1, settings.gridY);
         int gridZ = Mathf.Max(1, settings.gridZ);
-        int stepCount = Mathf.Max(1, settings.stepCount);
         float nearDepth = Mathf.Max(0.01f, camera.nearClipPlane + Mathf.Max(0f, settings.nearOffset));
         float maxDistance = Mathf.Max(nearDepth + 0.01f, settings.maxDistance);
         VolumetricLightingRendererFeature.DebugMode debugMode = settings.debugMode;
@@ -140,6 +234,13 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             false,
             FilterMode.Bilinear);
 
+        TextureHandle integratedTexture = UniversalRenderer.CreateRenderGraphTexture(
+            renderGraph,
+            froxelDescriptor,
+            "VolumetricLighting.IntegratedTexture",
+            false,
+            FilterMode.Bilinear);
+
         Matrix4x4 gpuProjection = GL.GetGPUProjectionMatrix(camera.projectionMatrix, false);
         Matrix4x4 inverseProjection = gpuProjection.inverse;
         Matrix4x4 cameraToWorld = camera.cameraToWorldMatrix;
@@ -157,6 +258,20 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         if (!enableDirectLighting && !enableAdditionalLights)
             return;
 
+        FroxelHistory history = settings.enableTemporalReprojection
+            ? GetHistory(camera, froxelDescriptor)
+            : null;
+        Vector4 froxelJitter = Vector4.zero;
+        if (history != null)
+        {
+            int sampleIndex = history.frameIndex % JitterSequenceLength + 1;
+            froxelJitter = new Vector4(
+                Halton(sampleIndex, 3) - 0.5f,
+                Halton(sampleIndex, 5) - 0.5f,
+                Halton(sampleIndex, 2) - 0.5f,
+                0f);
+        }
+
         using (IComputeRenderGraphBuilder builder = renderGraph.AddComputePass<ComputePassData>(
                    "Volumetric Lighting Froxel Update",
                    out ComputePassData passData,
@@ -164,7 +279,6 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         {
             passData.computeShader = froxelUpdateShader;
             passData.computeKernelIndex = computeKernelIndex;
-            passData.cameraDepthTexture = resourceData.cameraDepthTexture;
             passData.froxelTexture = froxelTexture;
             passData.additionalLightsBuffer = additionalLightCount > 0
                 ? renderGraph.ImportBuffer(additionalLightsBuffer)
@@ -173,8 +287,6 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             passData.gridX = gridX;
             passData.gridY = gridY;
             passData.gridZ = gridZ;
-            passData.screenWidth = cameraData.cameraTargetDescriptor.width;
-            passData.screenHeight = cameraData.cameraTargetDescriptor.height;
             passData.nearDepth = nearDepth;
             passData.maxDistance = maxDistance;
             passData.inverseProjection = inverseProjection;
@@ -186,14 +298,79 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             passData.dispatchGroupsZ = Mathf.CeilToInt(gridZ / (float)threadGroupSizeZ);
             passData.enableDirectLighting = enableDirectLighting;
             passData.enableAdditionalLights = enableAdditionalLights;
+            passData.froxelJitter = froxelJitter;
 
-            builder.UseTexture(passData.cameraDepthTexture, AccessFlags.Read);
             builder.UseTexture(passData.froxelTexture, AccessFlags.Write);
             if (additionalLightCount > 0)
                 builder.UseBuffer(passData.additionalLightsBuffer, AccessFlags.Read);
             builder.AllowPassCulling(false);
             builder.AllowGlobalStateModification(true);
             builder.SetRenderFunc(static (ComputePassData data, ComputeGraphContext context) => ExecuteComputePass(data, context));
+        }
+
+        TextureHandle integrateSource = froxelTexture;
+        if (history != null)
+        {
+            int writeIndex = 1 - history.readIndex;
+            using (IComputeRenderGraphBuilder builder = renderGraph.AddComputePass<TemporalPassData>(
+                       "Volumetric Lighting Froxel Temporal",
+                       out TemporalPassData passData,
+                       profilingSampler))
+            {
+                passData.computeShader = froxelUpdateShader;
+                passData.kernelIndex = temporalKernelIndex;
+                passData.froxelTexture = froxelTexture;
+                passData.historyTexture = renderGraph.ImportTexture(history.textures[history.readIndex]);
+                passData.temporalTexture = renderGraph.ImportTexture(history.textures[writeIndex]);
+                passData.gridParams = new Vector4(gridX, gridY, gridZ, 0f);
+                passData.volumeParams = new Vector4(nearDepth, maxDistance, 0f, 0f);
+                passData.inverseProjection = inverseProjection;
+                passData.cameraToWorld = cameraToWorld;
+                passData.prevWorldToView = history.prevWorldToView;
+                passData.prevProjection = history.prevProjection;
+                passData.temporalParams = new Vector4(
+                    Mathf.Clamp(settings.temporalBlend, 0.05f, 1f),
+                    history.valid ? 1f : 0f,
+                    0f,
+                    0f);
+                passData.dispatchGroupsX = Mathf.CeilToInt(gridX / (float)threadGroupSizeX);
+                passData.dispatchGroupsY = Mathf.CeilToInt(gridY / (float)threadGroupSizeY);
+                passData.dispatchGroupsZ = Mathf.CeilToInt(gridZ / (float)threadGroupSizeZ);
+
+                builder.UseTexture(passData.froxelTexture, AccessFlags.Read);
+                builder.UseTexture(passData.historyTexture, AccessFlags.Read);
+                builder.UseTexture(passData.temporalTexture, AccessFlags.Write);
+                builder.AllowPassCulling(false);
+                builder.SetRenderFunc(static (TemporalPassData data, ComputeGraphContext context) => ExecuteTemporalPass(data, context));
+
+                integrateSource = passData.temporalTexture;
+            }
+
+            history.prevWorldToView = camera.worldToCameraMatrix;
+            history.prevProjection = gpuProjection;
+            history.readIndex = writeIndex;
+            history.valid = true;
+            ++history.frameIndex;
+        }
+
+        using (IComputeRenderGraphBuilder builder = renderGraph.AddComputePass<IntegratePassData>(
+                   "Volumetric Lighting Froxel Integrate",
+                   out IntegratePassData passData,
+                   profilingSampler))
+        {
+            passData.computeShader = froxelUpdateShader;
+            passData.kernelIndex = integrateKernelIndex;
+            passData.froxelTexture = integrateSource;
+            passData.integratedTexture = integratedTexture;
+            passData.gridParams = new Vector4(gridX, gridY, gridZ, 0f);
+            passData.volumeParams = new Vector4(nearDepth, maxDistance, 0f, 0f);
+            passData.dispatchGroupsX = Mathf.CeilToInt(gridX / (float)integrateGroupSizeX);
+            passData.dispatchGroupsY = Mathf.CeilToInt(gridY / (float)integrateGroupSizeY);
+
+            builder.UseTexture(passData.froxelTexture, AccessFlags.Read);
+            builder.UseTexture(passData.integratedTexture, AccessFlags.Write);
+            builder.AllowPassCulling(false);
+            builder.SetRenderFunc(static (IntegratePassData data, ComputeGraphContext context) => ExecuteIntegratePass(data, context));
         }
 
         RenderTextureDescriptor lightingDescriptor = cameraData.cameraTargetDescriptor;
@@ -226,7 +403,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
                 ? resourceData.activeColorTexture
                 : renderGraph.defaultResources.blackTexture;
             passData.cameraDepthTexture = resourceData.cameraDepthTexture;
-            passData.froxelTexture = froxelTexture;
+            passData.integratedTexture = integratedTexture;
             passData.gridX = gridX;
             passData.gridY = gridY;
             passData.gridZ = gridZ;
@@ -235,8 +412,6 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             passData.nearDepth = nearDepth;
             passData.maxDistance = maxDistance;
             passData.scatteringStrength = Mathf.Max(0f, settings.scatteringStrength);
-            passData.stepCount = stepCount;
-            passData.jitterStrength = Mathf.Clamp01(settings.jitterStrength);
             passData.compositeDepthBias = Mathf.Max(0f, settings.compositeDepthBias);
             passData.debugOpacity = Mathf.Clamp01(settings.debugOpacity);
             passData.inverseProjection = inverseProjection;
@@ -245,7 +420,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
 
             builder.UseTexture(passData.sourceTexture, AccessFlags.Read);
             builder.UseTexture(passData.cameraDepthTexture, AccessFlags.Read);
-            builder.UseTexture(passData.froxelTexture, AccessFlags.Read);
+            builder.UseTexture(passData.integratedTexture, AccessFlags.Read);
             if (useIntermediateLightingTexture)
             {
                 builder.SetRenderAttachment(lightingTexture, 0, AccessFlags.WriteAll);
@@ -363,11 +538,6 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         context.cmd.SetComputeTextureParam(
             data.computeShader,
             data.computeKernelIndex,
-            VolumetricLightingShaderIDs.CameraDepthTexture,
-            data.cameraDepthTexture);
-        context.cmd.SetComputeTextureParam(
-            data.computeShader,
-            data.computeKernelIndex,
             VolumetricLightingShaderIDs.FroxelTexture,
             data.froxelTexture);
         if (data.additionalLightCount > 0)
@@ -382,10 +552,6 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             data.computeShader,
             VolumetricLightingShaderIDs.GridParams,
             new Vector4(data.gridX, data.gridY, data.gridZ, 0f));
-        context.cmd.SetComputeVectorParam(
-            data.computeShader,
-            VolumetricLightingShaderIDs.ScreenSize,
-            new Vector4(data.screenWidth, data.screenHeight, 1f / Mathf.Max(1, data.screenWidth), 1f / Mathf.Max(1, data.screenHeight)));
         context.cmd.SetComputeVectorParam(
             data.computeShader,
             VolumetricLightingShaderIDs.VolumeParams,
@@ -410,12 +576,54 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             data.computeShader,
             VolumetricLightingShaderIDs.AdditionalLightCount,
             data.additionalLightCount);
+        context.cmd.SetComputeVectorParam(
+            data.computeShader,
+            VolumetricLightingShaderIDs.FroxelJitter,
+            data.froxelJitter);
         context.cmd.DispatchCompute(
             data.computeShader,
             data.computeKernelIndex,
             data.dispatchGroupsX,
             data.dispatchGroupsY,
             data.dispatchGroupsZ);
+    }
+
+    static void ExecuteTemporalPass(TemporalPassData data, ComputeGraphContext context)
+    {
+        if (data.dispatchGroupsX <= 0 || data.dispatchGroupsY <= 0 || data.dispatchGroupsZ <= 0)
+            return;
+
+        context.cmd.SetComputeTextureParam(data.computeShader, data.kernelIndex, VolumetricLightingShaderIDs.FroxelSource, data.froxelTexture);
+        context.cmd.SetComputeTextureParam(data.computeShader, data.kernelIndex, VolumetricLightingShaderIDs.HistoryTexture, data.historyTexture);
+        context.cmd.SetComputeTextureParam(data.computeShader, data.kernelIndex, VolumetricLightingShaderIDs.TemporalTexture, data.temporalTexture);
+        context.cmd.SetComputeVectorParam(data.computeShader, VolumetricLightingShaderIDs.GridParams, data.gridParams);
+        context.cmd.SetComputeVectorParam(data.computeShader, VolumetricLightingShaderIDs.VolumeParams, data.volumeParams);
+        context.cmd.SetComputeMatrixParam(data.computeShader, VolumetricLightingShaderIDs.InverseProjectionMatrix, data.inverseProjection);
+        context.cmd.SetComputeMatrixParam(data.computeShader, VolumetricLightingShaderIDs.CameraToWorldMatrix, data.cameraToWorld);
+        context.cmd.SetComputeMatrixParam(data.computeShader, VolumetricLightingShaderIDs.PrevWorldToViewMatrix, data.prevWorldToView);
+        context.cmd.SetComputeMatrixParam(data.computeShader, VolumetricLightingShaderIDs.PrevProjectionMatrix, data.prevProjection);
+        context.cmd.SetComputeVectorParam(data.computeShader, VolumetricLightingShaderIDs.TemporalParams, data.temporalParams);
+        context.cmd.DispatchCompute(data.computeShader, data.kernelIndex, data.dispatchGroupsX, data.dispatchGroupsY, data.dispatchGroupsZ);
+    }
+
+    static void ExecuteIntegratePass(IntegratePassData data, ComputeGraphContext context)
+    {
+        if (data.dispatchGroupsX <= 0 || data.dispatchGroupsY <= 0)
+            return;
+
+        context.cmd.SetComputeTextureParam(
+            data.computeShader,
+            data.kernelIndex,
+            VolumetricLightingShaderIDs.FroxelSource,
+            data.froxelTexture);
+        context.cmd.SetComputeTextureParam(
+            data.computeShader,
+            data.kernelIndex,
+            VolumetricLightingShaderIDs.IntegratedTexture,
+            data.integratedTexture);
+        context.cmd.SetComputeVectorParam(data.computeShader, VolumetricLightingShaderIDs.GridParams, data.gridParams);
+        context.cmd.SetComputeVectorParam(data.computeShader, VolumetricLightingShaderIDs.VolumeParams, data.volumeParams);
+        context.cmd.DispatchCompute(data.computeShader, data.kernelIndex, data.dispatchGroupsX, data.dispatchGroupsY, 1);
     }
 
     int UpdateAdditionalLightsBuffer(UniversalLightData lightData)
@@ -526,8 +734,8 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         if (data.cameraDepthTexture.IsValid())
             data.material.SetTexture(VolumetricLightingShaderIDs.CameraDepthTexture, data.cameraDepthTexture);
-        if (data.froxelTexture.IsValid())
-            data.material.SetTexture(VolumetricLightingShaderIDs.FroxelTexture, data.froxelTexture);
+        if (data.integratedTexture.IsValid())
+            data.material.SetTexture(VolumetricLightingShaderIDs.IntegratedTexture, data.integratedTexture);
         if (data.lightingTexture.IsValid())
             data.material.SetTexture(VolumetricLightingShaderIDs.LightingTexture, data.lightingTexture);
 
@@ -539,11 +747,9 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         data.material.SetMatrix(VolumetricLightingShaderIDs.InverseProjectionMatrix, data.inverseProjection);
         data.material.SetColor(VolumetricLightingShaderIDs.MainLightColor, data.mainLightColor);
         data.material.SetFloat(VolumetricLightingShaderIDs.ScatteringStrength, data.scatteringStrength);
-        data.material.SetFloat(VolumetricLightingShaderIDs.JitterStrength, data.jitterStrength);
         data.material.SetFloat(VolumetricLightingShaderIDs.CompositeDepthBias, data.compositeDepthBias);
         data.material.SetFloat(VolumetricLightingShaderIDs.DebugOpacity, data.debugOpacity);
         data.material.SetFloat(VolumetricLightingShaderIDs.KawaseIteration, data.kawaseIteration);
-        data.material.SetInt(VolumetricLightingShaderIDs.StepCount, data.stepCount);
 
         int passIndex = data.passIndex >= 0
             ? data.passIndex
@@ -555,18 +761,16 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
     {
         internal ComputeShader computeShader;
         internal BufferHandle additionalLightsBuffer;
-        internal TextureHandle cameraDepthTexture;
         internal TextureHandle froxelTexture;
         internal Matrix4x4 inverseProjection;
         internal Matrix4x4 cameraToWorld;
         internal Vector3 mainLightDirection;
         internal Color mainLightColor;
+        internal Vector4 froxelJitter;
         internal int computeKernelIndex;
         internal int gridX;
         internal int gridY;
         internal int gridZ;
-        internal int screenWidth;
-        internal int screenHeight;
         internal int dispatchGroupsX;
         internal int dispatchGroupsY;
         internal int dispatchGroupsZ;
@@ -577,12 +781,43 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal float maxDistance;
     }
 
+    sealed class TemporalPassData
+    {
+        internal ComputeShader computeShader;
+        internal TextureHandle froxelTexture;
+        internal TextureHandle historyTexture;
+        internal TextureHandle temporalTexture;
+        internal Matrix4x4 inverseProjection;
+        internal Matrix4x4 cameraToWorld;
+        internal Matrix4x4 prevWorldToView;
+        internal Matrix4x4 prevProjection;
+        internal Vector4 gridParams;
+        internal Vector4 volumeParams;
+        internal Vector4 temporalParams;
+        internal int kernelIndex;
+        internal int dispatchGroupsX;
+        internal int dispatchGroupsY;
+        internal int dispatchGroupsZ;
+    }
+
+    sealed class IntegratePassData
+    {
+        internal ComputeShader computeShader;
+        internal TextureHandle froxelTexture;
+        internal TextureHandle integratedTexture;
+        internal Vector4 gridParams;
+        internal Vector4 volumeParams;
+        internal int kernelIndex;
+        internal int dispatchGroupsX;
+        internal int dispatchGroupsY;
+    }
+
     sealed class RasterPassData
     {
         internal Material material;
         internal TextureHandle sourceTexture;
         internal TextureHandle cameraDepthTexture;
-        internal TextureHandle froxelTexture;
+        internal TextureHandle integratedTexture;
         internal TextureHandle lightingTexture;
         internal Matrix4x4 inverseProjection;
         internal Color mainLightColor;
@@ -591,13 +826,11 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal int gridZ;
         internal int screenWidth;
         internal int screenHeight;
-        internal int stepCount;
         internal int debugMode;
         internal int passIndex;
         internal float nearDepth;
         internal float maxDistance;
         internal float scatteringStrength;
-        internal float jitterStrength;
         internal float compositeDepthBias;
         internal float debugOpacity;
         internal float kawaseIteration;

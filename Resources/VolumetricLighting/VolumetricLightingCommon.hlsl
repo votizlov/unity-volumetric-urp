@@ -28,6 +28,13 @@ float VolumetricLighting_SliceIndexToLinearDepth(float sliceIndex, float sliceCo
     return nearDepth * pow(maxDistance / max(nearDepth, VOLUMETRIC_LIGHTING_EPSILON), t);
 }
 
+float VolumetricLighting_SliceEdgeToLinearDepth(float edgeIndex, float sliceCount, float nearDepth, float maxDistance)
+{
+    float t = saturate(edgeIndex / max(sliceCount, 1.0));
+    float ratio = max(maxDistance / max(nearDepth, VOLUMETRIC_LIGHTING_EPSILON), 1.0);
+    return nearDepth * exp2(t * log2(ratio));
+}
+
 float VolumetricLighting_LinearDepthToSlice01(float linearDepth, float nearDepth, float maxDistance)
 {
     float safeNear = max(nearDepth, VOLUMETRIC_LIGHTING_EPSILON);
@@ -43,6 +50,24 @@ float3 VolumetricLighting_GetViewRay(float2 uv, float4x4 inverseProjection)
     float4 viewPosition = mul(inverseProjection, clipPosition);
     float3 ray = viewPosition.xyz / max(abs(viewPosition.z), VOLUMETRIC_LIGHTING_EPSILON);
     return ray;
+}
+
+// Reads the front-to-back integrated volume at an arbitrary depth. Texel z stores the integral up
+// to the far edge of slice z; the two edges bracketing the depth are read at exact slice centres
+// (bilinear in XY only) and blended linearly in depth, which is exact for constant per-slice lighting.
+float3 VolumetricLighting_SampleIntegrated(TEXTURE3D_PARAM(integratedTexture, integratedSampler), float2 uv, float rayEnd, float sliceCount, float nearDepth, float maxDistance)
+{
+    float slicePosition = VolumetricLighting_LinearDepthToSlice01(rayEnd, nearDepth, maxDistance) * sliceCount;
+    float sliceIndex = min(floor(slicePosition), sliceCount - 1.0);
+    float sliceStart = VolumetricLighting_SliceEdgeToLinearDepth(sliceIndex, sliceCount, nearDepth, maxDistance);
+    float sliceEnd = VolumetricLighting_SliceEdgeToLinearDepth(sliceIndex + 1.0, sliceCount, nearDepth, maxDistance);
+    float weight = saturate((rayEnd - sliceStart) / max(sliceEnd - sliceStart, VOLUMETRIC_LIGHTING_EPSILON));
+
+    float3 integratedEnd = SAMPLE_TEXTURE3D_LOD(integratedTexture, integratedSampler, float3(uv, (sliceIndex + 0.5) / sliceCount), 0).rgb;
+    float3 integratedStart = sliceIndex > 0.0
+        ? SAMPLE_TEXTURE3D_LOD(integratedTexture, integratedSampler, float3(uv, (sliceIndex - 0.5) / sliceCount), 0).rgb
+        : 0.0.xxx;
+    return lerp(integratedStart, integratedEnd, weight);
 }
 
 float VolumetricLighting_Hash11(float value)
