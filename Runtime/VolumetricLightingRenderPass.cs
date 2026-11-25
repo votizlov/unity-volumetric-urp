@@ -413,6 +413,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
             passData.maxDistance = maxDistance;
             passData.scatteringStrength = Mathf.Max(0f, settings.scatteringStrength);
             passData.compositeDepthBias = Mathf.Max(0f, settings.compositeDepthBias);
+            passData.distanceFade = GetDistanceFade(settings);
             passData.debugOpacity = Mathf.Clamp01(settings.debugOpacity);
             passData.inverseProjection = inverseProjection;
             passData.mainLightColor = lightColor;
@@ -676,6 +677,16 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         additionalLightsCpuData = new AdditionalLightGpuData[newSize];
     }
 
+    static Vector4 GetDistanceFade(VolumetricLightingRendererFeature.Settings settings)
+    {
+        if (!settings.enableDistanceFade)
+            return Vector4.zero;
+
+        float start = Mathf.Max(0f, settings.distanceFadeStart);
+        float length = Mathf.Max(0.01f, settings.distanceFadeEnd - start);
+        return new Vector4(start, 1f / length, 0f, 0f);
+    }
+
     static bool ShouldProcessLight(Light light)
     {
         return light != null
@@ -748,6 +759,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         data.material.SetColor(VolumetricLightingShaderIDs.MainLightColor, data.mainLightColor);
         data.material.SetFloat(VolumetricLightingShaderIDs.ScatteringStrength, data.scatteringStrength);
         data.material.SetFloat(VolumetricLightingShaderIDs.CompositeDepthBias, data.compositeDepthBias);
+        data.material.SetVector(VolumetricLightingShaderIDs.DistanceFade, data.distanceFade);
         data.material.SetFloat(VolumetricLightingShaderIDs.DebugOpacity, data.debugOpacity);
         data.material.SetFloat(VolumetricLightingShaderIDs.KawaseIteration, data.kawaseIteration);
 
@@ -832,6 +844,7 @@ public sealed class VolumetricLightingRenderPass : ScriptableRenderPass
         internal float maxDistance;
         internal float scatteringStrength;
         internal float compositeDepthBias;
+        internal Vector4 distanceFade;
         internal float debugOpacity;
         internal float kawaseIteration;
     }

@@ -27,6 +27,7 @@ static class VolumetricLightingShaderIDs
     internal static readonly int MainLightColor = Shader.PropertyToID("_VolumetricLightingMainLightColor");
     internal static readonly int ScatteringStrength = Shader.PropertyToID("_VolumetricLightingScatteringStrength");
     internal static readonly int CompositeDepthBias = Shader.PropertyToID("_VolumetricLightingCompositeDepthBias");
+    internal static readonly int DistanceFade = Shader.PropertyToID("_VolumetricLightingDistanceFade");
     internal static readonly int DebugOpacity = Shader.PropertyToID("_VolumetricLightingDebugOpacity");
     internal static readonly int KawaseIteration = Shader.PropertyToID("_VolumetricLightingKawaseIteration");
 }

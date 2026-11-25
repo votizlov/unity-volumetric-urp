@@ -33,6 +33,7 @@ Shader "Hidden/VolumetricLighting/Composite"
             float _VolumetricLightingCompositeDepthBias;
             float _VolumetricLightingDebugOpacity;
             float _VolumetricLightingKawaseIteration;
+            float4 _VolumetricLightingDistanceFade;
             CBUFFER_END
 
             struct Attributes
@@ -54,13 +55,14 @@ Shader "Hidden/VolumetricLighting/Composite"
                 return output;
             }
 
+            // Unclamped: the distance fade needs the real surface distance.
             float VolumetricLighting_LoadSceneDepth(float2 uv)
             {
                 float rawDepth = SampleSceneDepth(VolumetricLighting_GetDepthUv(uv));
                 float sceneDepth = LinearEyeDepth(rawDepth, _ZBufferParams);
                 if (!isfinite(sceneDepth) || sceneDepth <= 0.0)
-                    sceneDepth = _VolumetricLightingVolumeParams.y;
-                return min(sceneDepth, _VolumetricLightingVolumeParams.y);
+                    sceneDepth = VOLUMETRIC_LIGHTING_NO_SURFACE_DEPTH;
+                return sceneDepth;
             }
 
             float3 VolumetricLighting_AccumulateLighting(float2 uv, float sceneDepth)
@@ -79,8 +81,9 @@ Shader "Hidden/VolumetricLighting/Composite"
             float3 VolumetricLighting_Accumulate(float2 uv, float sceneDepth)
             {
                 float maxDistance = _VolumetricLightingVolumeParams.y;
-                float3 lighting = VolumetricLighting_AccumulateLighting(uv, sceneDepth);
-                return lighting * (_VolumetricLightingScatteringStrength / max(maxDistance, 0.001));
+                float3 lighting = VolumetricLighting_AccumulateLighting(uv, min(sceneDepth, maxDistance));
+                float fade = VolumetricLighting_DistanceFade(sceneDepth, _VolumetricLightingDistanceFade);
+                return lighting * (_VolumetricLightingScatteringStrength * fade / max(maxDistance, 0.001));
             }
 
             half3 KawaseBlurFilter(half2 texCoord, half2 pixelSize, half iteration)
@@ -218,6 +221,7 @@ Shader "Hidden/VolumetricLighting/Composite"
             float _VolumetricLightingCompositeDepthBias;
             float _VolumetricLightingDebugOpacity;
             float _VolumetricLightingKawaseIteration;
+            float4 _VolumetricLightingDistanceFade;
             CBUFFER_END
 
             struct Attributes
@@ -239,13 +243,14 @@ Shader "Hidden/VolumetricLighting/Composite"
                 return output;
             }
 
+            // Unclamped: the distance fade needs the real surface distance.
             float VolumetricLighting_LoadSceneDepth(float2 uv)
             {
                 float rawDepth = SampleSceneDepth(VolumetricLighting_GetDepthUv(uv));
                 float sceneDepth = LinearEyeDepth(rawDepth, _ZBufferParams);
                 if (!isfinite(sceneDepth) || sceneDepth <= 0.0)
-                    sceneDepth = _VolumetricLightingVolumeParams.y;
-                return min(sceneDepth, _VolumetricLightingVolumeParams.y);
+                    sceneDepth = VOLUMETRIC_LIGHTING_NO_SURFACE_DEPTH;
+                return sceneDepth;
             }
 
             float3 VolumetricLighting_AccumulateLighting(float2 uv, float sceneDepth)
@@ -264,8 +269,9 @@ Shader "Hidden/VolumetricLighting/Composite"
             float3 VolumetricLighting_Accumulate(float2 uv, float sceneDepth)
             {
                 float maxDistance = _VolumetricLightingVolumeParams.y;
-                float3 lighting = VolumetricLighting_AccumulateLighting(uv, sceneDepth);
-                return lighting * (_VolumetricLightingScatteringStrength / max(maxDistance, 0.001));
+                float3 lighting = VolumetricLighting_AccumulateLighting(uv, min(sceneDepth, maxDistance));
+                float fade = VolumetricLighting_DistanceFade(sceneDepth, _VolumetricLightingDistanceFade);
+                return lighting * (_VolumetricLightingScatteringStrength * fade / max(maxDistance, 0.001));
             }
 
             half4 FragAccumulateScalar(Varyings input) : SV_Target

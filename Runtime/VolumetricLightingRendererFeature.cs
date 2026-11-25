@@ -24,6 +24,12 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
         [Min(0.1f)] public float maxDistance = 48f;
         [Min(0f)] public float scatteringStrength = 0.35f;
         [Min(0f)] public float compositeDepthBias = 0.01f;
+        [Tooltip("Fade the effect out on surfaces far from the camera, so the distant background and the sky keep their colours.")]
+        public bool enableDistanceFade = false;
+        [Tooltip("Surface distance where the fade starts, in metres.")]
+        [Min(0f)] public float distanceFadeStart = 30f;
+        [Tooltip("Surface distance where the effect is fully transparent, in metres.")]
+        [Min(0f)] public float distanceFadeEnd = 60f;
         [Tooltip("Jitter froxel samples every frame and blend with the reprojected previous frame. Removes shaft flicker caused by the coarse froxel grid sampling the shadow map.")]
         public bool enableTemporalReprojection = true;
         [Tooltip("Weight of the current frame. Higher reacts faster to moving shadows, lower is smoother.")]

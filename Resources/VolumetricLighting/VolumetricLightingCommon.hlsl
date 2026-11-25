@@ -2,6 +2,8 @@
 #define VOLUMETRIC_LIGHTING_COMMON_INCLUDED
 
 static const float VOLUMETRIC_LIGHTING_EPSILON = 1e-4;
+// Depth used where the depth buffer holds no surface (sky): beyond any distance fade.
+static const float VOLUMETRIC_LIGHTING_NO_SURFACE_DEPTH = 1e6;
 
 float2 VolumetricLighting_GetFullscreenTriangleUV(uint vertexID)
 {
@@ -69,6 +71,14 @@ float3 VolumetricLighting_SampleIntegrated(TEXTURE3D_PARAM(integratedTexture, in
         ? SAMPLE_TEXTURE3D_LOD(integratedTexture, integratedSampler, float3(uv, (sliceIndex - 0.5) / sliceCount), 0).rgb
         : 0.0.xxx;
     return lerp(integratedStart, integratedEnd, weight);
+}
+
+// Smoothly fades the effect out on surfaces far from the camera. x: fade start distance,
+// y: 1 / fade length; y = 0 keeps the effect at full strength everywhere.
+float VolumetricLighting_DistanceFade(float surfaceDepth, float4 distanceFade)
+{
+    float t = saturate((surfaceDepth - distanceFade.x) * distanceFade.y);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
 float VolumetricLighting_Hash11(float value)
