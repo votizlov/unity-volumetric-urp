@@ -45,6 +45,8 @@ public sealed class VolumetricLightingRendererFeature : ScriptableRendererFeatur
 
     [SerializeField] Settings settings = new Settings();
 
+    public Settings FeatureSettings => settings;
+
     VolumetricLightingRenderPass renderPass;
     ComputeShader froxelUpdateShader;
     Material compositeMaterial;
