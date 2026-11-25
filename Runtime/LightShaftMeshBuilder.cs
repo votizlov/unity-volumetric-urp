@@ -17,7 +17,8 @@ public static class LightShaftMeshBuilder
     {
         new(VertexAttribute.Position, VertexAttributeFormat.Float32, 3),
         new(VertexAttribute.Normal, VertexAttributeFormat.Float32, 3),
-        new(VertexAttribute.Color, VertexAttributeFormat.Float32, 4)
+        new(VertexAttribute.Color, VertexAttributeFormat.Float32, 4),
+        new(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2)
     };
 
     public struct ShaftLight
@@ -64,6 +65,7 @@ public static class LightShaftMeshBuilder
         public Vector3 position;
         public Vector3 normal;
         public Color color;
+        public Vector2 uv;
     }
 
     /// <summary>
@@ -112,7 +114,11 @@ public static class LightShaftMeshBuilder
         return extractJob.Schedule(buildHandle);
     }
 
-    /// <summary>Rewrites <paramref name="target"/> with the quads, opaque at the silhouette edge and fading out at the far end.</summary>
+    /// <summary>
+    /// Rewrites <paramref name="target"/> with the quads, opaque at the silhouette edge and fading out at the far end.
+    /// UV: v runs 0 at the edge to 1 at the far end, as the fade does, so a texture scrolled along v flows along the
+    /// shafts; u runs along the edge at one unit per unit of its length, the same density on every shaft, each from 0.
+    /// </summary>
     public static void WriteMesh(NativeArray<ShaftQuad> quads, Mesh target)
     {
         int vertexCount = quads.Length * 4;
@@ -128,10 +134,12 @@ public static class LightShaftMeshBuilder
         {
             ShaftQuad quad = quads[i];
             int baseVertex = i * 4;
-            vertices[baseVertex] = new ShaftVertex { position = quad.a, normal = quad.normal, color = edgeColor };
-            vertices[baseVertex + 1] = new ShaftVertex { position = quad.b, normal = quad.normal, color = edgeColor };
-            vertices[baseVertex + 2] = new ShaftVertex { position = quad.c, normal = quad.normal, color = endColor };
-            vertices[baseVertex + 3] = new ShaftVertex { position = quad.d, normal = quad.normal, color = endColor };
+            // c continues b and d continues a away from the light
+            float edge = math.distance(quad.a, quad.b);
+            vertices[baseVertex] = new ShaftVertex { position = quad.a, normal = quad.normal, color = edgeColor, uv = new Vector2(0f, 0f) };
+            vertices[baseVertex + 1] = new ShaftVertex { position = quad.b, normal = quad.normal, color = edgeColor, uv = new Vector2(edge, 0f) };
+            vertices[baseVertex + 2] = new ShaftVertex { position = quad.c, normal = quad.normal, color = endColor, uv = new Vector2(edge, 1f) };
+            vertices[baseVertex + 3] = new ShaftVertex { position = quad.d, normal = quad.normal, color = endColor, uv = new Vector2(0f, 1f) };
 
             int baseIndex = i * 6;
             indices[baseIndex] = baseVertex;
