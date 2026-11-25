@@ -25,7 +25,8 @@ float2 VolumetricLighting_GetDepthUv(float2 uv)
 float VolumetricLighting_SliceIndexToLinearDepth(float sliceIndex, float sliceCount, float nearDepth, float maxDistance)
 {
     float t = saturate((sliceIndex + 0.5) / max(sliceCount, 1.0));
-    return nearDepth * pow(maxDistance / max(nearDepth, VOLUMETRIC_LIGHTING_EPSILON), t);
+    float ratio = max(maxDistance / max(nearDepth, VOLUMETRIC_LIGHTING_EPSILON), 1.0);
+    return nearDepth * exp2(t * log2(ratio));
 }
 
 float VolumetricLighting_SliceEdgeToLinearDepth(float edgeIndex, float sliceCount, float nearDepth, float maxDistance)

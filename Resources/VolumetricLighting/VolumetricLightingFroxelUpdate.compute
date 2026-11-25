@@ -5,7 +5,8 @@
 #pragma multi_compile _ _MAIN_LIGHT_SHADOWS
 #pragma multi_compile _ _MAIN_LIGHT_SHADOWS_CASCADE
 #pragma multi_compile _ _ADDITIONAL_LIGHT_SHADOWS
-#pragma multi_compile _ _SHADOWS_SOFT
+// No _SHADOWS_SOFT: one hardware PCF tap per froxel. Per-frame jitter, temporal blending and froxel
+// interpolation already filter far wider than a soft-shadow kernel, which cost 16 taps per froxel at High.
 #pragma multi_compile _ _VL_DIRECT_LIGHTING
 #pragma multi_compile _ _VL_ADDITIONAL_LIGHTS
 
@@ -50,7 +51,7 @@ float4 _VolumetricLightingTemporalParams;
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     int3 grid = int3(_VolumetricLightingGridParams.xyz);
-    if (any(dispatchThreadID >= grid))
+    if (any(int3(dispatchThreadID) >= grid))
         return;
 
     float nearDepth = _VolumetricLightingVolumeParams.x;
@@ -111,7 +112,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 void CSTemporal(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
     int3 grid = int3(_VolumetricLightingGridParams.xyz);
-    if (any(dispatchThreadID >= grid))
+    if (any(int3(dispatchThreadID) >= grid))
         return;
 
     int3 froxelCoord = int3(dispatchThreadID);
